@@ -104,6 +104,7 @@ class Clip:
     offset: float = 0.0             # where `source` starts on the project's timeline (video fetched
                                     # just for this moment after an audio-first scan)
     overlays: list[ImageOverlay] = field(default_factory=list)
+    origin: str = "ai"              # "ai" = the app's guess, "user" = your pick (added by hand / from Summary)
 
     @property
     def length(self) -> float:
@@ -138,6 +139,8 @@ class Project:
     segments: list = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
     export: ExportSettings = field(default_factory=ExportSettings)
+    # the AI's section-by-section summary of what's said: {start, end, summary, interest(0-1)} in file time
+    sections: list = field(default_factory=list)
 
     def to_stream(self, t: float) -> float:
         """Position in this project's file -> position in the original stream."""
@@ -148,6 +151,24 @@ class Project:
                     seg = sg
             return seg[1] + (t - seg[0])
         return t + self.offset
+
+    def to_stream_end(self, t: float) -> float:
+        """Like to_stream, for the *end* of a span: a span ending exactly where two downloaded parts
+        meet ends at the end of the first part, not the start of the next."""
+        return self.to_stream(max(0.0, t - 0.01)) + 0.01
+
+    def from_stream(self, t: float) -> float:
+        """Position in the original stream -> position in this project's file (nearest part)."""
+        if self.segments:
+            best, dist = None, 1e18
+            for fs, ss, ln in self.segments:
+                if ss - 1e-6 <= t <= ss + ln + 1e-6:
+                    return fs + (t - ss)
+                d = min(abs(t - ss), abs(t - ss - ln))
+                if d < dist:
+                    best, dist = (fs + max(0.0, min(ln, t - ss))), d
+            return best if best is not None else 0.0
+        return max(0.0, t - self.offset)
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -162,7 +183,7 @@ class Project:
         exp = ExportSettings(**d.get("export", {}))
         return Project(source=d.get("source", ""), title=d.get("title", ""), url=d.get("url", ""),
                        offset=float(d.get("offset", 0.0)), segments=d.get("segments", []) or [],
-                       clips=clips, export=exp)
+                       clips=clips, export=exp, sections=d.get("sections", []) or [])
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -469,7 +490,7 @@ def export_project(project: Project, out_dir: str | Path,
                 except Exception:
                     pass
             rows.append([i, c.title, _ts(project.to_stream(c.start + c.offset)),
-                         _ts(project.to_stream(c.end + c.offset)),
+                         _ts(project.to_stream_end(c.end + c.offset)),
                          f"{c.out_length:.1f}", c.score,
                          "; ".join(c.reasons), out.name])
             done += 1

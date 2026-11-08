@@ -7,20 +7,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPalette, QPixmap
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPalette, QPixmap, QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
-    QStyle, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QStackedWidget, QStyle, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__, analysis, config, context_images, downloader, editor
 from .. import ffmpeg_tools as ft
 from .. import ai, diction, gpu_pack, transcribe, updater
-from .timeline import Timeline, fmt_time
+from .timeline import ClipTimeline, Scrubber, Timeline, fmt_time
 from .workers import Worker
 
 try:
@@ -92,6 +92,43 @@ def open_folder(path: str | Path):
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
+class TimeSpinBox(QDoubleSpinBox):
+    """Shows and accepts times as h:mm:ss.s in *stream* time; the value itself is project time."""
+    def __init__(self):
+        super().__init__()
+        self.to_disp = lambda t: t
+        self.from_disp = lambda t: t
+        self.setDecimals(1)
+        self.setSingleStep(0.5)
+        self.setRange(0, 1e7)
+        self.setKeyboardTracking(False)        # apply when you press Enter / leave the box
+        self.setToolTip("Time in the stream (h:mm:ss.s). Type a time, use the arrows, or drag the "
+                        "handles on the moment's timeline.")
+
+    def textFromValue(self, v):
+        t = max(0.0, float(self.to_disp(v)))
+        h, rem = divmod(t, 3600)
+        m, sec = divmod(rem, 60)
+        sec = round(sec, 1)
+        if sec >= 60:
+            sec, m = 0.0, m + 1
+        return f"{int(h)}:{int(m):02d}:{sec:04.1f}" if h >= 1 else f"{int(m)}:{sec:04.1f}"
+
+    def valueFromText(self, text):
+        secs = 0.0
+        try:
+            for part in text.strip().split(":"):
+                secs = secs * 60 + float(part or 0)
+        except ValueError:
+            return self.value()
+        return float(self.from_disp(secs))
+
+    def validate(self, text, pos):
+        import re
+        ok = re.fullmatch(r"[\d:.\s]*", text) is not None
+        return (QValidator.Acceptable if ok else QValidator.Invalid), text, pos
+
+
 def section(title: str) -> QLabel:
     l = QLabel(title)
     l.setObjectName("section")
@@ -131,6 +168,7 @@ class MainWindow(QMainWindow):
         self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self._build_menu()
+        self._update_no_video("")
         sb = QStatusBar()                  # kept for messages, but never shown as a strip
         self.setStatusBar(sb)
         sb.hide()
@@ -153,14 +191,18 @@ class MainWindow(QMainWindow):
         self._toast.adjustSize()
         w = min(self._toast.width(), self.width() - 40)
         self._toast.resize(w, self._toast.height())
-        self._toast.move(self.width() - w - 20, 64)          # top-right, under the tabs
+        self._toast.move(self.width() - w - 12, 2)           # top-right, in the empty end of the tab bar
         self._toast.raise_()
         self._toast.show()
         self._toast_timer.start(4000)
 
     # ------------------------------------------------------------------ menu
     def _build_menu(self):
-        m = self.menuBar().addMenu("&File")
+        """☰ button in the tab bar's corner; File and Help live in its menu (room for more later)."""
+        self.menuBar().hide()
+        root = QMenu(self)
+        root.setObjectName("hamburger")
+        m = root.addMenu("File")
         for text, key, fn in [
             ("Open video…", QKeySequence.Open, self.open_video_dialog),
             ("Open project…", "Ctrl+Shift+O", self.open_project),
@@ -169,22 +211,37 @@ class MainWindow(QMainWindow):
         ]:
             a = QAction(text, self)
             a.setShortcut(key)
+            a.setShortcutContext(Qt.ApplicationShortcut)
             a.triggered.connect(fn)
+            self.addAction(a)                  # shortcuts work even while the menu is closed
             m.addAction(a)
         m.addSeparator()
         a = QAction("Settings…", self)
         a.triggered.connect(self.open_settings)
         m.addAction(a)
         a = QAction("Quit", self)
+        a.setShortcut("Ctrl+Q")
         a.triggered.connect(self.close)
+        self.addAction(a)
         m.addAction(a)
-        h = self.menuBar().addMenu("&Help")
+        h = root.addMenu("Help")
         a = QAction("About", self)
         a.triggered.connect(lambda: QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME} {__version__}</b><br>Download Rumble streams, find the best "
             "moments automatically, and export them as polished clips.<br><br>Only download and re-publish "
             "videos you own or have permission to use."))
         h.addAction(a)
+        self.menu_root = root
+        btn = QToolButton()
+        btn.setObjectName("hamburgerBtn")
+        btn.setText("☰")
+        btn.setToolTip("Menu")
+        btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setMenu(root)
+        btn.setCursor(Qt.PointingHandCursor)
+        self.menu_btn = btn
+        self.tabs.setCornerWidget(btn, Qt.TopLeftCorner)
+        btn.show()
 
     def _check_ffmpeg(self):
         try:
@@ -405,9 +462,13 @@ class MainWindow(QMainWindow):
             self.src_label.setText("No video loaded")
             self.timeline.set_data(0)
             self.timeline.set_clips([])
+            self.timeline.set_sections([])
             self._fill_clip_list()
+            self._fill_summary()
             self._update_more_button()
             self._update_audio_banner()
+            self._refresh_scrubber()
+            self._update_no_video("")
         failed = []
         for p in paths:
             try:
@@ -656,9 +717,32 @@ class MainWindow(QMainWindow):
         v.addWidget(self.audio_banner)
 
         self.timeline = Timeline()
-        self.timeline.seek.connect(self.seek_to)
+        self.timeline.seek.connect(self.scrub_to)
         self.timeline.clip_clicked.connect(lambda i: self.clip_list.setCurrentRow(i))
         v.addWidget(self.timeline)
+
+        # the selected moment's own timeline - slides open under the main one
+        self.clip_tl_box = QFrame()
+        self.clip_tl_box.setObjectName("cliptl")
+        ctl = QVBoxLayout(self.clip_tl_box)
+        ctl.setContentsMargins(0, 4, 0, 0)
+        ctl.setSpacing(2)
+        self.clip_tl_title = QLabel("")
+        self.clip_tl_title.setObjectName("muted")
+        ctl.addWidget(self.clip_tl_title)
+        self.clip_tl = ClipTimeline()
+        self.clip_tl.time_fn = lambda t: self.project.to_stream(t)
+        self.clip_tl.end_fn = lambda t: self.project.to_stream_end(t)
+        self.clip_tl.span_changed.connect(self._clip_span_dragged)
+        self.clip_tl.span_committed.connect(self._clip_span_committed)
+        self.clip_tl.seek.connect(self.scrub_to)
+        ctl.addWidget(self.clip_tl)
+        self.clip_tl_box.setMaximumHeight(0)
+        self._clip_tl_h = 96
+        self._clip_anim = QPropertyAnimation(self.clip_tl_box, b"maximumHeight", self)
+        self._clip_anim.setDuration(180)
+        self._clip_anim.setEasingCurve(QEasingCurve.OutCubic)
+        v.addWidget(self.clip_tl_box)
 
         split = QSplitter(Qt.Horizontal)
         v.addWidget(split, 1)
@@ -699,7 +783,33 @@ class MainWindow(QMainWindow):
         b_clear = QPushButton("Clear log"); b_clear.clicked.connect(self.ai_log.clear)
         lrow.addStretch(); lrow.addWidget(b_copy); lrow.addWidget(b_clear)
         lgv.addLayout(lrow)
-        self.left_tabs.addTab(log_page, "🧠 AI log")
+        self.left_tabs.addTab(log_page, "AI log")
+        sum_page = QWidget(); smv = QVBoxLayout(sum_page); smv.setContentsMargins(0, 4, 0, 0)
+        sh = QLabel("What's said, section by section · tick the ones you like → add to Moments")
+        sh.setObjectName("muted")
+        sh.setWordWrap(True)
+        smv.addWidget(sh)
+        self.sum_list = QListWidget()
+        self.sum_list.setObjectName("summary")
+        self.sum_list.setWordWrap(True)
+        self.sum_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sum_list.itemChanged.connect(lambda *_: self._update_sum_buttons())
+        self.sum_list.itemClicked.connect(self._summary_clicked)
+        self.sum_list.itemDoubleClicked.connect(lambda it: self.add_sections_to_moments([self.sum_list.row(it)]))
+        smv.addWidget(self.sum_list, 1)
+        srow = QHBoxLayout()
+        self.btn_sum_add = QPushButton("★ Add ticked to Moments")
+        self.btn_sum_add.setObjectName("primary")
+        self.btn_sum_add.setToolTip("Adds the ticked sections to the top of Moments as your picks (★, gold) - "
+                                    "trim them with the moment's timeline. Double-click a section to add just that one.")
+        self.btn_sum_add.clicked.connect(lambda: self.add_sections_to_moments())
+        self.btn_sum_add.setEnabled(False)
+        b_scopy = QPushButton("Copy")
+        b_scopy.setToolTip("Copy the summary as text")
+        b_scopy.clicked.connect(lambda: QApplication.clipboard().setText(self._summary_text()))
+        srow.addWidget(self.btn_sum_add, 1); srow.addWidget(b_scopy)
+        smv.addLayout(srow)
+        self.left_tabs.addTab(sum_page, "Summary")
         outer_l.addWidget(self.left_tabs, 1)
         lv = outer_l
         brow = QGridLayout()
@@ -732,10 +842,25 @@ class MainWindow(QMainWindow):
                 self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video)
             self.player.positionChanged.connect(self._pos_changed)
-            mv.addWidget(self.video, 1)
+            self.video_stack = QStackedWidget()
+            self.video_stack.addWidget(self.video)
         else:
             self.player = None
-            mv.addWidget(QLabel("Video preview unavailable (Qt Multimedia missing)."), 1)
+            self.video_stack = QStackedWidget()
+            self.video_stack.addWidget(QLabel("Video preview unavailable (Qt Multimedia missing)."))
+        self.no_video = QLabel()
+        self.no_video.setObjectName("novideo")
+        self.no_video.setAlignment(Qt.AlignCenter)
+        self.no_video.setWordWrap(True)
+        self.video_stack.addWidget(self.no_video)
+        self.video_stack.setMinimumSize(280, 158)
+        self._showing_video = None
+        mv.addWidget(self.video_stack, 1)
+        self.scrubber = Scrubber()
+        self.scrubber.time_fn = lambda t: self.project.to_stream(t)
+        self.scrubber.seek.connect(self.scrub_to)
+        self.scrubber.setToolTip("Drag to move anywhere · blue = video downloaded, grey = audio only")
+        mv.addWidget(self.scrubber)
         tr = QHBoxLayout()
         st = self.style()
         self.btn_play = QToolButton(); self.btn_play.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
@@ -743,7 +868,7 @@ class MainWindow(QMainWindow):
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_play_clip = QPushButton("▶ Play clip")
         self.btn_play_clip.clicked.connect(self.play_clip)
-        self.pos_label = QLabel("0:00"); self.pos_label.setMinimumWidth(60)
+        self.pos_label = QLabel("0:00"); self.pos_label.setMinimumWidth(110)
         self.btn_set_in = QPushButton("[  Set start"); self.btn_set_in.setShortcut("I")
         self.btn_set_in.clicked.connect(lambda: self._set_edge("start"))
         self.btn_set_out = QPushButton("Set end  ]"); self.btn_set_out.setShortcut("O")
@@ -790,9 +915,11 @@ class MainWindow(QMainWindow):
         g1 = QGroupBox("Clip")
         fl = QFormLayout(g1)
         self.i_title = QLineEdit(); self.i_title.setPlaceholderText("Clip title (used as the file name)")
-        self.i_start = QDoubleSpinBox(); self.i_end = QDoubleSpinBox()
+        self.i_start = TimeSpinBox(); self.i_end = TimeSpinBox()
         for sb in (self.i_start, self.i_end):
-            sb.setDecimals(1); sb.setSingleStep(0.5); sb.setRange(0, 1e7); sb.setSuffix(" s")
+            sb.to_disp = lambda t: self.project.to_stream(t)
+            sb.from_disp = lambda t: self.project.from_stream(t)
+        self.i_end.to_disp = lambda t: self.project.to_stream_end(t)
         self.i_len = QLabel("")
         self.i_why = QLabel(""); self.i_why.setWordWrap(True); self.i_why.setObjectName("muted")
         fl.addRow("Title", self.i_title)
@@ -959,6 +1086,9 @@ class MainWindow(QMainWindow):
         if self.player:
             self.player.pause()
         self._update_audio_banner()
+        self._refresh_scrubber()
+        self._show_pos(0.0)
+        self._fill_summary()
         self.tabs.setCurrentIndex(1)
         self.statusBar().showMessage(f"Loaded {path}", 5000)
         self.btn_analyse.setFocus()
@@ -984,11 +1114,14 @@ class MainWindow(QMainWindow):
         if not self.project.source:
             QMessageBox.information(self, APP_NAME, "Load a video first (tab ①).")
             return
-        ticked_fetched = [c for c in self.project.clips if c.source != self.project.source]
-        if self.project.clips and not (reuse and not ticked_fetched) and QMessageBox.question(
-                self, "Replace clips?", "This replaces your current clip list"
-                + (f" (including {len(ticked_fetched)} clip(s) you already fetched video for)" if ticked_fetched else "")
-                + ". Continue?") != QMessageBox.Yes:
+        ai_clips = [c for c in self.project.clips if c.origin != "user"]
+        ticked_fetched = [c for c in ai_clips if c.source != self.project.source]
+        mine = len(self.project.clips) - len(ai_clips)
+        if ai_clips and not (reuse and not ticked_fetched) and QMessageBox.question(
+                self, "Replace moments?", "This replaces the moments the app found"
+                + (f" (including {len(ticked_fetched)} you already fetched video for)" if ticked_fetched else "")
+                + "." + (f" Your {mine} ★ pick{'s are' if mine != 1 else ' is'} kept." if mine else "")
+                + " Continue?") != QMessageBox.Yes:
             return
         config.save_settings({"batch_size": self.n_clips.value(), "clip_min": self.min_len.value(),
                               "clip_max": self.max_len.value(),
@@ -1060,7 +1193,11 @@ class MainWindow(QMainWindow):
         self.result = res
         self.candidates = list(res.highlights)       # already ranked best first
         self._shown_total = 0
-        self.project.clips = []
+        self.project.clips = [c for c in self.project.clips if c.origin == "user"]   # your picks stay
+        new_secs = [x.as_dict() for x in getattr(res, "sections", []) or []]
+        if new_secs or (getattr(res, "blocks", None) is not None and getattr(res, "word_note", "") == "ai"):
+            self.project.sections = new_secs
+        self._fill_summary()
         self.timeline.set_data(res.duration, res.times, res.score)
         self.show_more(first=True)
         n = len(res.highlights)
@@ -1165,14 +1302,23 @@ class MainWindow(QMainWindow):
             if t:
                 it.setIcon(QIcon(QPixmap(t)))
             it.setData(Qt.UserRole, id(c))
+            if c.origin == "user":                  # your picks: gold, so they don't mix with the AI's
+                it.setBackground(QBrush(QColor("#2a2414")))
+                it.setForeground(QBrush(QColor("#f5d48a")))
             self.clip_list.addItem(it)
         self.clip_list.blockSignals(False)
-        self.timeline.set_clips(self._spans(), row if keep_row else -1,
-                                [self._why_html(c) for c in self.project.clips])
+        self._sync_timeline(row if keep_row else -1)
+        self._refresh_scrubber()
         if keep_row and 0 <= row < self.clip_list.count():
             self.clip_list.setCurrentRow(row)
         elif not self.project.clips:
             self.inspector.setEnabled(False)
+            self._show_clip_timeline(None)
+        self._mark_added_sections()
+
+    def _sync_timeline(self, row: int):
+        self.timeline.set_clips(self._spans(), row, [self._why_html(c) for c in self.project.clips],
+                                [c.origin == "user" for c in self.project.clips])
 
     def _rows_moved(self, *_):
         by_id = {id(c): c for c in self.project.clips}
@@ -1193,7 +1339,8 @@ class MainWindow(QMainWindow):
     def select_clip(self, row: int):
         c = self.current_clip()
         self.inspector.setEnabled(c is not None)
-        self.timeline.set_clips(self._spans(), row, [self._why_html(c) for c in self.project.clips])
+        self._sync_timeline(row)
+        self._show_clip_timeline(c)
         if not c:
             return
         self._loading_inspector = True
@@ -1204,10 +1351,11 @@ class MainWindow(QMainWindow):
         for sb in (self.i_start, self.i_end):
             sb.setRange(c.offset, c.offset + (src_dur or 1e7))
         self.i_title.setText(c.title)
+        self.i_title.setCursorPosition(0)
         self.i_start.setValue(c.start + c.offset)
         self.i_end.setValue(c.end + c.offset)
         self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported")
-        self.i_why.setText(" · ".join(c.reasons) or "Added manually")
+        self.i_why.setText(("★ Your pick · " if c.origin == "user" else "") + (" · ".join(c.reasons) or "Added manually"))
         self.i_why.setToolTip(self._why_html(c))
         self.i_why.setText(self.i_why.text() + "   ⓘ")
         self.i_speed.setCurrentText(f"{c.speed:g}×")
@@ -1241,6 +1389,8 @@ class MainWindow(QMainWindow):
                     self.i_start.blockSignals(True); self.i_start.setValue(c.start + c.offset)
                     self.i_start.blockSignals(False)
             self.seek_clip(c, c.start if attr == "start" else max(c.start, c.end - 3))
+        if attr in ("start", "end"):
+            self._show_clip_timeline(c, keep_view=True)
         if attr in ("start", "end", "speed"):
             self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported")
         if attr in ("title", "start", "end", "speed"):
@@ -1248,14 +1398,17 @@ class MainWindow(QMainWindow):
 
     def _item_text(self, i: int, c) -> str:
         reason = c.reasons[0] if c.reasons else "Manual clip"
-        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream(c.end + c.offset)
+        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream_end(c.end + c.offset)
         tag = "   🔊 audio only" if not self._has_video(c.source) else ("   🎬 video fetched" if c.offset else "")
+        if c.origin == "user":
+            return (f"★ {i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
+                    f"your pick{tag}\n{reason}")
         return (f"{i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
                 f"score {c.score:.0f}{tag}\n{reason}")
 
     def _why_html(self, c) -> str:
         """Hover text: why this moment was picked and why it starts/ends where it does."""
-        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream(c.end + c.offset)
+        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream_end(c.end + c.offset)
         why = c.why or c.reasons or ["Added by hand."]
         timing = c.timing or ["You set the start and end yourself."]
         li = lambda xs: "".join(f"<li>{x}</li>" for x in xs)
@@ -1283,7 +1436,171 @@ class MainWindow(QMainWindow):
         if not (0 <= r < len(self.project.clips)):
             return
         self.clip_list.item(r).setText(self._item_text(r, self.project.clips[r]))
-        self.timeline.set_clips(self._spans(), r, [self._why_html(c) for c in self.project.clips])
+        self._sync_timeline(r)
+
+    def _user_insert_row(self) -> int:
+        """Your picks stay together at the top of Moments, newest last."""
+        r = 0
+        while r < len(self.project.clips) and self.project.clips[r].origin == "user":
+            r += 1
+        return r
+
+    # ------------------------------------------------------------------ the moment's own timeline
+    def _show_clip_timeline(self, c, keep_view: bool = False):
+        want = c is not None and bool(self.project.source)
+        if want:
+            r = self.project.clips.index(c) if c in self.project.clips else -1
+            if c.source == self.project.source:
+                lim = (0.0, self.info.duration if self.info else c.end + 60)
+            else:
+                lim = (c.offset, c.offset + (self._src_duration(c.source) or (c.end + 60)))
+            r_ = self.result
+            self.clip_tl.set_clip(c.start + c.offset, c.end + c.offset, lim,
+                                  getattr(r_, "times", None), getattr(r_, "score", None),
+                                  user=c.origin == "user", keep_view=keep_view)
+            who = "★ Your pick" if c.origin == "user" else f"Moment {r + 1}"
+            self.clip_tl_title.setText(f"{who} - {c.title}   ·   drag the handles for the exact start and end, "
+                                       "drag the middle to move it, click outside to jump there")
+        target = self._clip_tl_h if want else 0
+        if self.clip_tl_box.maximumHeight() != target and self._clip_anim.endValue() != target:
+            self._clip_anim.stop()
+            self._clip_anim.setStartValue(self.clip_tl_box.maximumHeight())
+            self._clip_anim.setEndValue(target)
+            self._clip_anim.start()
+
+    def _clip_span_dragged(self, a: float, b: float, what: str):
+        c = self.current_clip()
+        if not c:
+            return
+        c.start, c.end = round(a - c.offset, 2), round(b - c.offset, 2)
+        for sb, v in ((self.i_start, a), (self.i_end, b)):
+            sb.blockSignals(True); sb.setValue(v); sb.blockSignals(False)
+        self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported")
+        self._update_item_text(self.clip_list.currentRow())
+        self.seek_clip(c, c.end if what == "end" else c.start)      # see / hear the exact edge
+
+    def _clip_span_committed(self, a: float, b: float, what: str):
+        c = self.current_clip()
+        if not c:
+            return
+        note = "You set the start and end yourself on the moment's timeline."
+        if note not in c.timing:
+            c.timing = list(c.timing) + [note]
+        self.clip_list.item(self.clip_list.currentRow()).setToolTip(self._why_html(c))
+        self._sync_timeline(self.clip_list.currentRow())
+        # land just before the edge you moved, so pressing play lets you hear it
+        self.seek_clip(c, max(c.start, c.end - 3) if what == "end" else c.start)
+
+    # ------------------------------------------------------------------ the AI's summary
+    def _fill_summary(self):
+        secs = list(self.project.sections or [])
+        self.timeline.set_sections([(x["start"], x["end"], x["interest"], x["summary"]) for x in secs])
+        self.sum_list.blockSignals(True)
+        self.sum_list.clear()
+        if not secs:
+            it = QListWidgetItem("No summary yet.\n\nScan with “AI reads…” (Settings → AI models) and the AI "
+                                 "describes each section of the stream here - e.g. “argues with a viewer about "
+                                 "tariffs”. Tick the ones you like to add them to Moments.")
+            it.setFlags(Qt.NoItemFlags)
+            self.sum_list.addItem(it)
+        for x in secs:
+            a, b = self.project.to_stream(x["start"]), self.project.to_stream_end(x["end"])
+            n = round(x["interest"] * 10)
+            dots = "●" * max(0, min(5, round(n / 2))) + "○" * (5 - max(0, min(5, round(n / 2))))
+            it = QListWidgetItem(f"{fmt_time(a)} – {fmt_time(b)}   {dots} {n}/10\n{x['summary']}")
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked)
+            if x["interest"] < 0.4:
+                it.setForeground(QBrush(QColor("#6b7280")))
+                it.setToolTip("The AI found little of interest here (filler, a transition, chat-reading…)")
+            else:
+                it.setToolTip(f"{fmt_time(a)} – {fmt_time(b)} ({(b - a) / 60:.1f} min)<br>{x['summary']}"
+                              "<br><i>Click to listen · double-click to add to Moments</i>")
+            self.sum_list.addItem(it)
+        self.sum_list.blockSignals(False)
+        self._mark_added_sections()
+        self._update_sum_buttons()
+        n = len(secs)
+        self.left_tabs.setTabToolTip(2, f"{n} sections summarised by the AI" if n else "No summary yet")
+
+    def _mark_added_sections(self):
+        if not hasattr(self, "sum_list"):
+            return
+        picks = {(round(c.start, 1), round(c.end, 1)) for c in self.project.clips
+                 if c.origin == "user" and c.source == self.project.source}
+        self.sum_list.blockSignals(True)
+        for i, x in enumerate(self.project.sections or []):
+            it = self.sum_list.item(i)
+            if it is None:
+                continue
+            text = it.text().split("   ★ in Moments")[0]
+            first, _, rest = text.partition("\n")
+            if (round(x["start"], 1), round(x["end"], 1)) in picks:
+                first += "   ★ in Moments"
+            it.setText(first + "\n" + rest)
+        self.sum_list.blockSignals(False)
+
+    def _update_sum_buttons(self):
+        n = sum(1 for i in range(self.sum_list.count())
+                if self.sum_list.item(i).flags() & Qt.ItemIsUserCheckable
+                and self.sum_list.item(i).checkState() == Qt.Checked)
+        self.btn_sum_add.setEnabled(n > 0)
+        self.btn_sum_add.setText(f"★ Add {n} to Moments" if n else "★ Add ticked to Moments")
+
+    def _summary_clicked(self, it):
+        r = self.sum_list.row(it)
+        secs = self.project.sections or []
+        if 0 <= r < len(secs):
+            self.scrub_to(float(secs[r]["start"]))
+
+    def _summary_text(self) -> str:
+        return "\n".join(f"{fmt_time(self.project.to_stream(x['start']))} – "
+                         f"{fmt_time(self.project.to_stream_end(x['end']))}  ({round(x['interest'] * 10)}/10)  "
+                         f"{x['summary']}" for x in (self.project.sections or []))
+
+    def add_sections_to_moments(self, rows: list[int] | None = None):
+        secs = self.project.sections or []
+        if rows is None:
+            rows = [i for i in range(min(self.sum_list.count(), len(secs)))
+                    if self.sum_list.item(i).checkState() == Qt.Checked]
+        rows = [r for r in rows if 0 <= r < len(secs)]
+        if not rows or not self.project.source:
+            return
+        have = {(round(c.start, 1), round(c.end, 1)) for c in self.project.clips if c.origin == "user"}
+        at = self._user_insert_row()
+        added = 0
+        for r in rows:
+            x = secs[r]
+            a, b = float(x["start"]), float(x["end"])
+            if (round(a, 1), round(b, 1)) in have:
+                continue
+            summ = x["summary"].strip().rstrip(".")
+            title = (summ[:1].upper() + summ[1:])[:60].rstrip() or "Section"
+            sa, sb = self.project.to_stream(a), self.project.to_stream_end(b)
+            c = editor.Clip(source=self.project.source, start=round(a, 2), end=round(b, 2), title=title,
+                            score=round(float(x["interest"]) * 100, 1), origin="user",
+                            reasons=[f"From the summary: {summ}"[:70]],
+                            why=[f"You picked this section from the AI's summary: “{summ}” "
+                                 f"(rated {round(x['interest'] * 10)}/10)."],
+                            timing=[f"The whole section as the AI summarised it, {fmt_time(sa)} – {fmt_time(sb)} "
+                                    f"({(sb - sa) / 60:.1f} min) - trim it on the moment's timeline."])
+            self.project.clips.insert(at + added, c)
+            added += 1
+        for i in range(self.sum_list.count()):
+            it = self.sum_list.item(i)
+            if it.flags() & Qt.ItemIsUserCheckable:
+                it.setCheckState(Qt.Unchecked)
+        if not added:
+            self._show_toast("Those sections are already in Moments")
+            return
+        self._fill_clip_list()
+        self.left_tabs.setCurrentIndex(0)
+        self.clip_list.setCurrentRow(at)
+        self.clip_list.scrollToItem(self.clip_list.item(at))
+        self._make_thumbnails()
+        self._update_audio_banner()
+        self._show_toast(f"★ Added {added} section{'s' if added != 1 else ''} to the top of Moments as your pick"
+                         f"{'s' if added != 1 else ''}")
 
     def add_clip_here(self):
         if not self.project.source:
@@ -1293,8 +1610,9 @@ class MainWindow(QMainWindow):
         L = (self.min_len.value() + self.max_len.value()) / 2
         s = max(0.0, t - L * 0.3)
         c = editor.Clip(source=self.project.source, start=round(s, 1), end=round(min(dur, s + L), 1),
-                        title=f"My clip - {fmt_time(t).replace(':', '.')}", reasons=["Added manually"])
-        r = max(0, self.clip_list.currentRow() + 1)
+                        title=f"My clip - {fmt_time(self.project.to_stream(t)).replace(':', '.')}",
+                        reasons=["Added by you"], origin="user")
+        r = self._user_insert_row()
         self.project.clips.insert(r, c)
         self._fill_clip_list()
         self.clip_list.setCurrentRow(r)
@@ -1305,7 +1623,7 @@ class MainWindow(QMainWindow):
             return
         from dataclasses import replace
         d = replace(c, title=c.title + " (copy)", overlays=[replace(o) for o in c.overlays],
-                    reasons=list(c.reasons))
+                    reasons=list(c.reasons), origin="user")
         r = self.clip_list.currentRow() + 1
         self.project.clips.insert(r, d)
         self._fill_clip_list()
@@ -1386,23 +1704,95 @@ class MainWindow(QMainWindow):
         """Current position expressed in clip `c`'s own file time."""
         return self._player_pos() + (self._media_offset or 0.0) - c.offset
 
-    def _load_media(self, path: str, offset: float | None):
+    def _load_media(self, path: str, offset: float | None, user: bool = False):
         self._media_offset = offset
         if self.player and path and self.player.source() != QUrl.fromLocalFile(path):
+            playing = self.player.playbackState() == QMediaPlayer.PlayingState
             self.player.setSource(QUrl.fromLocalFile(path))
+            if playing:
+                self.player.play()
+        self._update_no_video(path, user)
 
-    def seek_to(self, t: float):
-        """Seek on the project timeline (the stream, or its audio)."""
+    def _update_no_video(self, path: str | None = None, user: bool = False):
+        """Show the picture, or an icon + note when there's nothing to show."""
+        if path is None:
+            path = self.player.source().toLocalFile() if self.player else self.project.source
+        if not path or not os.path.exists(path):
+            self.no_video.setText("<p style='font-size:40px; margin:0'>🎬</p><p style='margin:4px'><b>Nothing loaded yet</b></p>"
+                                  "<span style='color:#9ca3af'>Open a video, or scan a stream's audio "
+                                  "on ① Get video.</span>")
+            show = False
+        elif not self._has_video(path):
+            self.no_video.setText("<p style='font-size:40px; margin:0'>🔊</p><p style='margin:4px'><b>Audio only here</b></p>"
+                                  "<span style='color:#9ca3af'>This part was scanned as audio, so there's no "
+                                  "picture to show - you'll still hear it.<br>Tick the moment and press "
+                                  "⬇ Get video to see it.</span>")
+            show = False
+        else:
+            show = True
+        if user and self._showing_video and not show:
+            self._show_toast("🔊 No video for this part - playing the audio")
+        self._showing_video = show
+        self.video_stack.setCurrentIndex(0 if show else 1)
+
+    def _src_duration(self, path: str) -> float:
+        cache = self.__dict__.setdefault("_dur_cache", {})
+        if path not in cache:
+            try:
+                cache[path] = ft.MediaInfo(path).duration
+            except Exception:
+                cache[path] = 0.0
+        return cache[path]
+
+    def _fetched_video(self):
+        """(clip, start, end) on the project timeline for moments whose video was fetched separately."""
+        out = []
+        for c in self.project.clips:
+            if c.source and c.source != self.project.source and os.path.exists(c.source) and self._has_video(c.source):
+                out.append((c, c.offset, c.offset + self._src_duration(c.source)))
+        return out
+
+    def _refresh_scrubber(self):
+        dur = self.info.duration if (self.info and self.project.source) else 0.0
+        self.scrubber.set_duration(dur)
+        if dur and self._has_video(self.project.source):
+            spans = [(0.0, dur)]
+        else:
+            spans = sorted((a, b) for _, a, b in self._fetched_video())
+        self.scrubber.set_video_spans(spans)
+
+    def _show_pos(self, t: float):
+        """t = position on the project timeline."""
+        total = self.project.to_stream(self.info.duration) if (self.info and self.project.source) else 0
+        self.pos_label.setText(fmt_time(self.project.to_stream(t)) + (f" / {fmt_time(total)}" if total else ""))
         self.timeline.set_playhead(t)
-        self.pos_label.setText(fmt_time(self.project.to_stream(t)))
+        self.scrubber.set_position(t)
+        self.clip_tl.set_playhead(t)
+
+    def scrub_to(self, t: float):
+        """Jump to project time t - shows a fetched video for that part if there is one."""
+        if not self.project.source:
+            return
+        self._clip_stop_at = None
+        for c, a, b in self._fetched_video():
+            if a <= t <= b:
+                self._show_pos(t)
+                if self.player:
+                    self._load_media(c.source, c.offset, user=True)
+                    self.player.setPosition(int((t - c.offset) * 1000))
+                return
+        self.seek_to(t, user=True)
+
+    def seek_to(self, t: float, user: bool = False):
+        """Seek on the project timeline (the stream, or its audio)."""
+        self._show_pos(t)
         if self.player and self.project.source:
-            self._load_media(self.project.source, 0.0)
+            self._load_media(self.project.source, 0.0, user=user)
             self.player.setPosition(int(t * 1000))
 
     def seek_clip(self, c, t: float):
         """Seek to time `t` inside clip c's own file (its downloaded video, or the stream)."""
-        self.timeline.set_playhead(t + c.offset)
-        self.pos_label.setText(fmt_time(self.project.to_stream(t + c.offset)))
+        self._show_pos(t + c.offset)
         if self.player:
             self._load_media(c.source, c.offset)
             self.player.setPosition(int(t * 1000))
@@ -1436,8 +1826,7 @@ class MainWindow(QMainWindow):
     def _pos_changed(self, ms):
         t = ms / 1000
         if self._media_offset is not None:          # None while an effects preview is playing
-            self.timeline.set_playhead(t + self._media_offset)
-            self.pos_label.setText(fmt_time(self.project.to_stream(t + self._media_offset)))
+            self._show_pos(t + self._media_offset)
         else:
             self.pos_label.setText(fmt_time(t))
         if self._clip_stop_at is not None and t >= self._clip_stop_at:
@@ -1476,7 +1865,7 @@ class MainWindow(QMainWindow):
         pad = 3.0
         dur = 0 if self.project.segments else (self.info.duration if self.info else 0) + self.project.offset
         spans = sorted((max(0.0, self.project.to_stream(c.start + c.offset) - pad),
-                        self.project.to_stream(c.end + c.offset) + pad) for c in targets)
+                        self.project.to_stream_end(c.end + c.offset) + pad) for c in targets)
         ranges: list[tuple[float, float | None]] = []
         for a, b in spans:                       # merge overlapping moments into one download
             if dur:
@@ -1507,7 +1896,7 @@ class MainWindow(QMainWindow):
             for c in targets:
                 pt_start = c.start + c.offset                       # position on the project timeline
                 a = self.project.to_stream(pt_start)
-                b = self.project.to_stream(c.end + c.offset)
+                b = self.project.to_stream_end(c.end + c.offset)
                 sec = next((x for x in res.sections if x.start <= a + 0.01 and (x.end is None or x.end >= b - 0.6)),
                            None)
                 if not sec:
@@ -1564,7 +1953,7 @@ class MainWindow(QMainWindow):
                                              "a clip to go back to the stream", 8000)
         w.done.connect(show)
         w.failed.connect(lambda m: QMessageBox.warning(self, "Preview failed", m))
-        w.finished.connect(lambda: (self.btn_preview.setEnabled(True), self.btn_preview.setText("Preview with effects")))
+        w.finished.connect(lambda: (self.btn_preview.setEnabled(True), self.btn_preview.setText("👁 Preview effects")))
         self._start(w)
 
     # ------------------------------------------------------------------ tab 3: export
@@ -1797,6 +2186,7 @@ class MainWindow(QMainWindow):
         self.project_path = path
         self._apply_export_settings()
         self.candidates = []
+        self._fill_summary()
         self._fill_clip_list()
         self._update_more_button()
         self._update_audio_banner()
@@ -2516,9 +2906,15 @@ QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; margin: -6px 0;
 QScrollArea {{ border: none; }}
 QPlainTextEdit#ailog {{ font-family: Consolas, "Cascadia Mono", monospace; font-size: 9pt; }}
 QTabWidget#lefttabs::pane {{ border: none; }}
+QLabel#novideo {{ background: #0e0f12; color: #e5e7eb; font-size: 14px; border-radius: 6px; }}
+QFrame#cliptl {{ background: transparent; }}
 QLabel#toast {{ background: #2a3a1e; color: #e5e7eb; border: 1px solid {ACCENT}; border-radius: 8px; padding: 8px 14px; }}
 QToolTip {{ background: #1f2228; color: #e5e7eb; border: 1px solid #3a404b; padding: 6px; }}
 QFrame#banner {{ background: #1f2a17; border: 1px solid #3d5a26; border-radius: 8px; }}
+QFrame#banner QLabel, QFrame#banner QCheckBox {{ background: transparent; }}
+QToolButton#hamburgerBtn {{ font-size: 17px; padding: 2px 10px; border: none; background: transparent; }}
+QToolButton#hamburgerBtn:hover {{ background: #2a2e36; border-radius: 6px; }}
+QToolButton#hamburgerBtn::menu-indicator {{ image: none; width: 0; }}
 QPushButton#more {{ background: #20242b; border: 1px dashed #4b5260; padding: 9px; color: #cbd5e1; }}
 QPushButton#more:hover {{ border-color: {ACCENT}; color: #fff; }}
 QCheckBox::indicator, QListWidget::indicator {{ width: 15px; height: 15px; border: 1px solid #4b5260;

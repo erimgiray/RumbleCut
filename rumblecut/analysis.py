@@ -213,6 +213,13 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     dur = info.duration
     if dur <= 0:
         raise ValueError("Couldn't read the video's length.")
+    # where separately downloaded parts were joined (the stream time jumps there)
+    joins: list[float] = []
+    if time_fn:
+        grid = np.arange(0.0, dur, 1.0)
+        st_ = np.array([time_fn(float(t)) for t in grid])
+        jumps = np.nonzero(np.abs(np.diff(st_) - 1.0) > 0.5)[0]
+        joins = [float(grid[j + 1]) for j in jumps]
 
     def stage(lo, hi):
         if not on_progress:
@@ -288,6 +295,8 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
 
     # ---- 2. what's said
     spans: list = []
+    sections: list = []          # merged, for showing
+    raw_sections: list = []      # per passage, for ranking
     word_note = ""
     blocks: list = []
     transcript = list(transcript or [])
@@ -315,6 +324,15 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     windows[-1] = (windows[-1][0], max(windows[-1][1], b))
                 else:
                     windows.append((a, b))
+        # never let one passage straddle a join - the two sides are hours apart in the stream
+        for jt in joins:
+            cut = []
+            for a, b in windows:
+                if a + 1 < jt < b - 1:
+                    cut += [(a, jt), (jt, b)]
+                else:
+                    cut.append((a, b))
+            windows = cut
         t_lo, t_hi = a_hi + (0.1 if scenes_on else 0), 0.75
         blocks = []
         asr_error = None
@@ -350,8 +368,20 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             log(f"⚠ Couldn't transcribe: {asr_error[:160]}")
         if ai_reader is not None and blocks:
             try:
+                import inspect
+                kw = {}
+                try:
+                    params = inspect.signature(ai_reader).parameters
+                    if "sections_out" in params:
+                        kw["sections_out"] = sections
+                    if "raw_sections_out" in params:
+                        kw["raw_sections_out"] = raw_sections
+                    if "joins" in params:
+                        kw["joins"] = joins
+                except (TypeError, ValueError):
+                    pass
                 spans = ai_reader(blocks, on_progress=stage(0.75, 0.96), cancel=cancel,
-                                  guidance=guidance, on_log=log, show_time=show)
+                                  guidance=guidance, on_log=log, show_time=show, **kw)
                 word_note = "ai"
             except Cancelled:
                 raise
@@ -376,10 +406,25 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                 span_at[j] = sp
     has_words = bool(spans)
     has_ai = any(sp.source == "ai" for sp in spans)
-    if has_ai:
+    # the AI's section summaries: interesting sections are where moments should come from;
+    # transitions, filler, coughing and technical trouble are pushed down
+    sec_interest = np.full(n, -1.0, np.float32)
+    sec_at: dict[int, object] = {}
+    for sc in raw_sections or sections:
+        a, b = int(sc.start / HOP), min(n, int(sc.end / HOP) + 1)
+        sec_interest[a:b] = sc.interest
+    for sc in sections:                     # the "Part of: …" text uses the joined summaries
+        a, b = int(sc.start / HOP), min(n, int(sc.end / HOP) + 1)
+        for j in range(a, b):
+            sec_at[j] = sc
+    if has_ai or sections:
         # content leads: the AI's rating decides, voice/energy break ties (and still surface
         # passages the AI didn't read)
         score = 2.4 * words_curve + 0.3 * base
+        if sections:
+            read = sec_interest >= 0
+            score = score + np.where(read, 0.9 * np.clip(sec_interest - 0.5, 0, None), 0.0)
+            score = score * np.where(read, 0.3 + 0.7 * np.clip(sec_interest, 0, 1), 0.85)
     elif has_words:
         score = base + 1.2 * words_curve
     else:
@@ -431,11 +476,11 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         ai_sp = span_at.get(i)
         if ai_sp is not None and getattr(ai_sp, "source", "") == "ai":
             ev_start, ev_end = float(ai_sp.start), max(float(ai_sp.end), float(ai_sp.start) + 3)
-            timing = [f"Your AI marked {_fmt(ev_start)} – {_fmt(ev_end)} as the moment itself."]
+            timing = [f"Your AI marked {show(ev_start)} – {show(ev_end)} as the moment itself."]
         else:
-            timing = [f"The excitement peaks at {_fmt(peak)}."]
+            timing = [f"The excitement peaks at {show(peak)}."]
             if ev_end - ev_start >= 2:
-                timing.append(f"It starts building at {_fmt(ev_start)} and settles by {_fmt(ev_end)}.")
+                timing.append(f"It starts building at {show(ev_start)} and settles by {show(ev_end)}.")
 
         # 2) add context: a lead-in so viewers see what led up to it, and a short tail
         start, end = ev_start - lead_in, ev_end + 2.0
@@ -535,6 +580,12 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             why.append(f"Busy on screen: {cuts} visual cuts or big changes within 6 s of the peak.")
             if kind == "Moment":
                 kind = "Action"
+        sc = sec_at.get(i)
+        if sc is not None:
+            why.insert(0, f"Part of: {sc.summary} (section rated {sc.interest * 10:.0f}/10 by your AI)")
+            if not reasons:
+                reasons.append(f"Section: {sc.summary}"[:70])
+                kind = "Section"
         if not reasons:
             reasons.append("Above-average energy")
             why.append("No single standout signal, but voice and energy here are livelier than most of the stream.")
@@ -559,6 +610,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     res = AnalysisResult(duration=dur, times=times, score=score, loudness=loud,
                          scene_times=scene_t, highlights=highlights, transcript=transcript or [])
     res.word_note = word_note
+    res.sections = sorted(sections, key=lambda x: x.start)
     res.blocks = blocks if words_on else None
     res.voice = vf
     res.guidance = guidance
