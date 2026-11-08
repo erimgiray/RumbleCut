@@ -17,6 +17,7 @@ DEFAULTS = {
     "scene_detection": True,
     "transcript_boost": False,   # (old setting, replaced by "judge_by")
     "judge_by": "candidates",    # "voice" | "candidates" | "full"
+    "ai_guidance": "",           # what the user told the AI to look for
     "whisper_model": "small",
     "export_quality": "high",
     "auto_update_check": True,

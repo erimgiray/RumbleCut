@@ -11,6 +11,7 @@ from ..ffmpeg_tools import Cancelled
 
 class Worker(QThread):
     progress = Signal(float, str)
+    log = Signal(str)          # free-text lines for the AI log panel
     done = Signal(object)
     failed = Signal(str)
     cancelled = Signal()

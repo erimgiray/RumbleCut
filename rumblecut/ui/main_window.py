@@ -427,31 +427,54 @@ class MainWindow(QMainWindow):
         self.min_gap.setValue(int(s["min_gap"]))
         self.use_scenes = QCheckBox("Scene changes"); self.use_scenes.setChecked(bool(s["scene_detection"]))
         self.judge_by = QComboBox()
-        self.judge_by.addItem("Voice & energy (fast)", "voice")
-        self.judge_by.addItem("Voice + what's said (recommended)", "candidates")
-        self.judge_by.addItem("Voice + full transcript (slowest)", "full")
+        self.judge_by.addItem("Voice & energy only (fast)", "voice")
+        self.judge_by.addItem("AI reads lively parts + samples (recommended)", "candidates")
+        self.judge_by.addItem("AI reads everything (slowest)", "full")
         self.judge_by.setToolTip(
             "<b>How moments are judged</b><br>"
             "<b>Voice &amp; energy:</b> pitch vs the speaker's normal (upbeat = higher), how animated the voice is, "
             "talking pace, laughter, and loudness.<br>"
-            "<b>+ what's said:</b> the ~30 best-sounding stretches are transcribed on your PC and your AI model "
-            "(Settings → AI models) rates them: funny, hot take, shocking, heated, quotable…<br>"
-            "<b>+ full transcript:</b> the whole stream is read - slow on long streams, but also catches "
-            "calmly-delivered gems.<br>Without an AI model, a built-in word list is used instead.")
+            "<b>AI reads lively parts + samples:</b> the ~20 liveliest stretches <i>and</i> a passage every few "
+            "minutes across the whole stream are transcribed on your PC; your AI model (Settings → AI models) "
+            "rates them - funny, hot take, shocking, heated, quotable… - and <b>its rating leads the ranking</b>, "
+            "with voice energy as a tie-breaker.<br>"
+            "<b>AI reads everything:</b> the whole stream is read - slowest, misses nothing.<br>"
+            "Use <b>Look for</b> to tell the AI what you want. Without an AI model, a built-in word list is used.")
         if not transcribe.available():
             for i in (1, 2):
                 self.judge_by.model().item(i).setEnabled(False)
         want = s.get("judge_by", "candidates") if transcribe.available() else "voice"
         self.judge_by.setCurrentIndex(max(0, self.judge_by.findData(want)))
+        self.min_gap.setToolTip("Minimum time between two moments, so you don't get near-duplicates")
+        for lbl, wdg in [("Show", self.n_clips), ("Min length", self.min_len), ("Max length", self.max_len),
+                         ("Gap", self.min_gap)]:
+            bar.addWidget(QLabel(lbl))
+            bar.addWidget(wdg)
         bar.addWidget(self.use_scenes)
-        bar.addWidget(QLabel("Judge by"))
-        bar.addWidget(self.judge_by)
         bar.addStretch()
         self.btn_analyse = QPushButton("Find highlights")
         self.btn_analyse.setObjectName("primary")
         self.btn_analyse.clicked.connect(self.run_analysis)
         bar.addWidget(self.btn_analyse)
         v.addLayout(bar)
+        grow = QHBoxLayout()
+        grow.addWidget(QLabel("Judge by"))
+        grow.addWidget(self.judge_by)
+        grow.addSpacing(10)
+        grow.addWidget(QLabel("🧠 Look for"))
+        self.guidance = QLineEdit(s.get("ai_guidance", ""))
+        self.guidance.setPlaceholderText("Tell the AI what you want, e.g. “funny moments”, “political hot takes”, "
+                                         "“anything about Amy Acton”, “rants about the media”  (optional)")
+        self.guidance.setClearButtonEnabled(True)
+        self.guidance.returnPressed.connect(self.ask_ai_again)
+        self.btn_reask = QPushButton("↻ Ask AI again")
+        self.btn_reask.setToolTip("Re-rank using the text in “Look for” - reuses the transcript from the last scan, "
+                                  "so it's much faster than a new scan")
+        self.btn_reask.clicked.connect(self.ask_ai_again)
+        self.btn_reask.setEnabled(False)
+        grow.addWidget(self.guidance, 1)
+        grow.addWidget(self.btn_reask)
+        v.addLayout(grow)
         prow = QHBoxLayout()
         self.an_progress = QProgressBar(); self.an_progress.setRange(0, 1000); self.an_progress.setMaximumHeight(14)
         self.an_progress.setTextVisible(False)
@@ -486,8 +509,13 @@ class MainWindow(QMainWindow):
         v.addWidget(split, 1)
 
         # left: clip list
-        left = QWidget(); lv = QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(section("Highlights  (tick = include in export, drag to reorder)"))
+        left = QWidget(); outer_l = QVBoxLayout(left); outer_l.setContentsMargins(0, 0, 0, 0)
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setObjectName("lefttabs")
+        moments_page = QWidget(); lv = QVBoxLayout(moments_page); lv.setContentsMargins(0, 4, 0, 0)
+        hint = QLabel("Tick to export · drag to reorder · hover for why")
+        hint.setObjectName("muted")
+        lv.addWidget(hint)
         self.clip_list = QListWidget()
         self.clip_list.setIconSize(QSize(128, 72))
         self.clip_list.setSpacing(2)
@@ -503,6 +531,22 @@ class MainWindow(QMainWindow):
         self.btn_more.clicked.connect(self.show_more)
         self.btn_more.hide()
         lv.addWidget(self.btn_more)
+        self.left_tabs.addTab(moments_page, "Moments")
+        log_page = QWidget(); lgv = QVBoxLayout(log_page); lgv.setContentsMargins(0, 4, 0, 0)
+        self.ai_log = QPlainTextEdit()
+        self.ai_log.setReadOnly(True)
+        self.ai_log.setObjectName("ailog")
+        self.ai_log.setPlaceholderText("What the AI reads and finds shows up here while you scan.\n\n"
+                                       "Tip: type what you're after in “Look for” above, then ↻ Ask AI again.")
+        lgv.addWidget(self.ai_log, 1)
+        lrow = QHBoxLayout()
+        b_copy = QPushButton("Copy log"); b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.ai_log.toPlainText()))
+        b_clear = QPushButton("Clear log"); b_clear.clicked.connect(self.ai_log.clear)
+        lrow.addStretch(); lrow.addWidget(b_copy); lrow.addWidget(b_clear)
+        lgv.addLayout(lrow)
+        self.left_tabs.addTab(log_page, "🧠 AI log")
+        outer_l.addWidget(self.left_tabs, 1)
+        lv = outer_l
         brow = QGridLayout()
         brow.setSpacing(4)
         for col, (text, tip, fn) in enumerate([
@@ -752,6 +796,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_data(self.info.duration)
         self.timeline.set_clips([])
         self.candidates = []
+        self.btn_reask.setEnabled(False)
         self._fill_clip_list()
         self._update_more_button()
         self._load_media(path, 0.0)
@@ -763,37 +808,70 @@ class MainWindow(QMainWindow):
         self.btn_analyse.setFocus()
 
     # ------------------------------------------------------------------ analysis
-    def run_analysis(self):
+    def _log(self, line: str):
+        from datetime import datetime
+        self.ai_log.appendPlainText(f"{datetime.now():%H:%M:%S}  {line}")
+
+    def ask_ai_again(self):
+        """Re-rank with the current guidance, reusing the transcript + voice pass of the last scan."""
+        r = self.result
+        if not (r is not None and getattr(r, "blocks", None)):
+            if self.project.source:
+                self.run_analysis()
+            return
+        if not ai.is_configured():
+            QMessageBox.information(self, APP_NAME, "Choose an AI model first: Settings → AI models.")
+            return
+        self.run_analysis(reuse=True)
+
+    def run_analysis(self, reuse: bool = False):
         if not self.project.source:
             QMessageBox.information(self, APP_NAME, "Load a video first (tab ①).")
             return
-        if self.project.clips and QMessageBox.question(
-                self, "Replace clips?", "Finding highlights again replaces your current clip list. Continue?") \
-                != QMessageBox.Yes:
+        ticked_fetched = [c for c in self.project.clips if c.source != self.project.source]
+        if self.project.clips and not (reuse and not ticked_fetched) and QMessageBox.question(
+                self, "Replace clips?", "This replaces your current clip list"
+                + (f" (including {len(ticked_fetched)} clip(s) you already fetched video for)" if ticked_fetched else "")
+                + ". Continue?") != QMessageBox.Yes:
             return
         config.save_settings({"batch_size": self.n_clips.value(), "clip_min": self.min_len.value(),
                               "clip_max": self.max_len.value(),
                               "min_gap": self.min_gap.value(), "scene_detection": self.use_scenes.isChecked(),
-                              "judge_by": self.judge_by.currentData()})
+                              "judge_by": self.judge_by.currentData(), "ai_guidance": self.guidance.text().strip()})
         src = self.project.source
         n, gap = 100, self.min_gap.value()   # rank all, show in batches
         lo, hi = self.min_len.value(), self.max_len.value()
         scenes = self.use_scenes.isChecked() and bool(self.info and self.info.has_video)
         words = self.judge_by.currentData() if transcribe.available() else "voice"
         use_ai = ai.is_configured()
+        guidance = self.guidance.text().strip()
+        cached_blocks = cached_voice = None
+        if reuse and self.result is not None and getattr(self.result, "blocks", None):
+            cached_blocks, cached_voice = self.result.blocks, getattr(self.result, "voice", None)
+            words = words if words != "voice" else "candidates"
+        if words != "voice":
+            self.left_tabs.setCurrentIndex(1)                # show the AI log while it works
+            self._log(("↻ Asking again" if reuse else "▶ New scan") + f" - {Path(src).name}"
+                      + (f" - looking for: {guidance}" if guidance else ""))
         self._judged_with = ("voice & energy" if words == "voice" else
                              f"voice + what's said ({ai.describe() if use_ai else 'built-in word list'})")
 
         def transcriber(path, a, b, cancel=None, on_progress=None):
             return transcribe.transcribe(path, start=a, end=b, cancel=cancel, on_progress=on_progress)
 
+        holder: list = []
+
         def job(on_progress=None, cancel=None):
             return analysis.find_highlights(src, n, (lo + hi) / 2, gap, scenes, None,
                                             on_progress=on_progress, cancel=cancel, min_len=lo, max_len=hi,
                                             words=words, transcriber=transcriber,
-                                            ai_reader=diction.ai_spans if use_ai else None)
+                                            ai_reader=diction.ai_spans if use_ai else None,
+                                            guidance=guidance, on_log=lambda m: holder[0].log.emit(m),
+                                            cached_blocks=cached_blocks, cached_voice=cached_voice)
 
         w = Worker(job)
+        holder.append(w)
+        w.log.connect(self._log)
         self.btn_analyse.setEnabled(False)
         self.btn_an_cancel.setEnabled(True)
         self.btn_an_cancel.clicked.connect(w.cancel)
@@ -805,11 +883,13 @@ class MainWindow(QMainWindow):
 
         def reset():
             self.btn_analyse.setEnabled(True)
+            self.btn_reask.setEnabled(bool(self.result is not None and getattr(self.result, "blocks", None)))
             self.btn_an_cancel.setEnabled(False)
             try:
                 self.btn_an_cancel.clicked.disconnect()
             except (RuntimeError, TypeError):
                 pass
+        self.btn_reask.setEnabled(False)
         w.finished.connect(reset)
         self._start(w)
 
@@ -828,6 +908,14 @@ class MainWindow(QMainWindow):
             msg += f"  ·  ⚠ {note}"
             self.statusBar().showMessage("⚠ " + note, 10000)
         self.an_status.setText(msg)
+        if getattr(res, "blocks", None) is not None:
+            ai_n = sum(1 for h in res.highlights if any(w.startswith("What's said") and "from your AI" in w for w in h.why))
+            self._log(f"✔ Done: {n} moments ranked"
+                      + (f", {ai_n} of them picked for what's said" if ai_n else "")
+                      + f". Top: {res.highlights[0].kind} at {fmt_time(self.project.to_stream(res.highlights[0].peak))}"
+                      if res.highlights else "✔ Done: nothing found.")
+            QTimer.singleShot(1500, lambda: self.left_tabs.setCurrentIndex(0))
+        self.btn_reask.setEnabled(bool(getattr(res, "blocks", None)))
 
     def show_more(self, first: bool = False):
         """Move the next batch of ranked moments into the clip list."""
@@ -2179,6 +2267,8 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #333844; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; margin: -6px 0; border-radius: 7px; }}
 QScrollArea {{ border: none; }}
+QPlainTextEdit#ailog {{ font-family: Consolas, "Cascadia Mono", monospace; font-size: 9pt; }}
+QTabWidget#lefttabs::pane {{ border: none; }}
 QLabel#toast {{ background: #2a3a1e; color: #e5e7eb; border: 1px solid {ACCENT}; border-radius: 8px; padding: 8px 14px; }}
 QToolTip {{ background: #1f2228; color: #e5e7eb; border: 1px solid #3a404b; padding: 6px; }}
 QFrame#banner {{ background: #1f2a17; border: 1px solid #3d5a26; border-radius: 8px; }}

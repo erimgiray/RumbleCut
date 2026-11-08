@@ -182,19 +182,26 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     min_len: float | None = None, max_len: float | None = None,
                     lead_in: float = 4.0, words: str = "off",
                     transcriber: Callable | None = None,
-                    ai_reader: Callable | None = None) -> AnalysisResult:
+                    ai_reader: Callable | None = None,
+                    guidance: str = "", on_log: Callable[[str], None] | None = None,
+                    cached_blocks: list | None = None, cached_voice=None) -> AnalysisResult:
     """Find the most interesting moments.
 
     How it's said (always): voice pitch vs the speaker's normal, how animated the voice is,
     talking pace, laughter - plus loudness as a minor signal.
     What's said (words="candidates" or "full"): the speech is transcribed by `transcriber`
     and rated by `ai_reader` (your AI model) or, without one, an offline word list.
-      candidates - only the ~30 best-sounding stretches are transcribed and read (fast)
-      full       - the whole stream is transcribed and read (slow, catches calm-but-funny lines)
+      candidates - the AI reads the ~20 liveliest stretches PLUS a sample every few minutes
+                   across the whole stream, so calm-but-great moments get a chance too
+      full       - the whole stream is transcribed and read (slowest)
+    When the AI has rated passages, *content leads*: the AI's rating is the main score and
+    voice/energy only break ties. `guidance` ("funny moments", "anything about X") is passed
+    to the AI. `cached_blocks` / `cached_voice` reuse an earlier transcript and voice pass.
 
     Clips follow each moment: they start when it begins to build (plus `lead_in` seconds),
     end once it has settled, snap to pauses, and stay within min_len..max_len."""
     from . import diction, voice
+    log = on_log or (lambda m: None)
 
     min_len = float(min_len if min_len is not None else max(5.0, clip_length * 0.6))
     max_len = float(max_len if max_len is not None else max(min_len, clip_length * 1.5))
@@ -211,11 +218,13 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         return lambda f, msg: on_progress(lo + (hi - lo) * max(0.0, f), msg)
 
     scenes_on = use_scenes and info.has_video
-    words_on = words in ("candidates", "full") and transcriber is not None
+    words_on = words in ("candidates", "full") and (transcriber is not None or cached_blocks is not None)
     a_hi = 0.25 if words_on else (0.6 if scenes_on else 0.95)
 
     # ---- 1. how it's said
-    if info.has_audio:
+    if cached_voice is not None:
+        vf = cached_voice
+    elif info.has_audio:
         vf = voice.analyse(src, dur, stage(0.0, a_hi), cancel)
     else:
         z = np.zeros(int(dur / HOP) + 1, np.float32)
@@ -278,63 +287,79 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     # ---- 2. what's said
     spans: list = []
     word_note = ""
+    blocks: list = []
     transcript = list(transcript or [])
     if words_on:
         if words == "full":
             windows = [(a, min(dur, a + 150.0)) for a in np.arange(0, dur, 150.0)]
         else:
-            # transcribe only the best-sounding stretches
+            # the liveliest stretches...
             order = np.argsort(-base)
             taken = np.zeros(n, bool)
             peaks = []
             for i in order:
-                if len(peaks) >= 30:
+                if len(peaks) >= 20:
                     break
                 if not taken[i]:
                     peaks.append(i)
                     taken[max(0, i - int(60 / HOP)): i + int(60 / HOP)] = True
+            raw = [(max(0.0, i * HOP - 50), min(dur, i * HOP + 40)) for i in peaks]
+            # ...plus an even sample across the whole stream, so calm parts get read too
+            every = 300.0 if dur > 1800 else max(60.0, dur / 6)
+            raw += [(t, min(dur, t + 90.0)) for t in np.arange(every / 2, dur, every)]
             windows = []
-            for i in sorted(peaks):
-                a, b = max(0.0, i * HOP - 50), min(dur, i * HOP + 40)
+            for a, b in sorted(raw):
                 if windows and a <= windows[-1][1]:
-                    windows[-1] = (windows[-1][0], b)
+                    windows[-1] = (windows[-1][0], max(windows[-1][1], b))
                 else:
                     windows.append((a, b))
         t_lo, t_hi = a_hi + (0.1 if scenes_on else 0), 0.75
         blocks = []
-        total_secs = sum(b - a for a, b in windows) or 1
-        done_secs = 0.0
         asr_error = None
-        for a, b in windows:
-            if cancel and cancel():
-                raise Cancelled()
-            try:
-                segs = transcriber(src, a, b, cancel=cancel,
-                               on_progress=(lambda f, m, d=done_secs, ln=b - a: on_progress(
-                                   t_lo + (t_hi - t_lo) * (d + max(0, f) * ln) / total_secs,
-                                   f"Transcribing what's said… ({_fmt(a)} – {_fmt(b)})")) if on_progress else None)
-            except Cancelled:
-                raise
-            except Exception as e:          # e.g. speech model can't download while offline
-                asr_error = str(e)
-                break
-            done_secs += b - a
-            transcript.extend(segs)
-            blocks.append((a, b, segs))
+        if cached_blocks is not None:
+            blocks = list(cached_blocks)
+            for _, _, segs in blocks:
+                transcript.extend(segs)
+            log(f"Reusing the transcript from the last scan ({len(blocks)} passages).")
+        else:
+            total_secs = sum(b - a for a, b in windows) or 1
+            log(f"🎙 Transcribing {len(windows)} passages ({total_secs / 60:.0f} min of {dur / 60:.0f} min) on this PC…")
+            done_secs = 0.0
+            for a, b in windows:
+                if cancel and cancel():
+                    raise Cancelled()
+                try:
+                    segs = transcriber(src, a, b, cancel=cancel,
+                                   on_progress=(lambda f, m, d=done_secs, ln=b - a: on_progress(
+                                       t_lo + (t_hi - t_lo) * (d + max(0, f) * ln) / total_secs,
+                                       f"Transcribing what's said… ({_fmt(a)} – {_fmt(b)})")) if on_progress else None)
+                except Cancelled:
+                    raise
+                except Exception as e:          # e.g. speech model can't download while offline
+                    asr_error = str(e)
+                    break
+                done_secs += b - a
+                transcript.extend(segs)
+                blocks.append((a, b, segs))
         if asr_error:
             word_note = f"Couldn't transcribe the speech ({asr_error[:120]}) - judged by voice & energy only"
             blocks, transcript = [], []
+        if asr_error:
+            log(f"⚠ Couldn't transcribe: {asr_error[:160]}")
         if ai_reader is not None and blocks:
             try:
-                spans = ai_reader(blocks, on_progress=stage(0.75, 0.96), cancel=cancel)
+                spans = ai_reader(blocks, on_progress=stage(0.75, 0.96), cancel=cancel,
+                                  guidance=guidance, on_log=log)
                 word_note = "ai"
             except Cancelled:
                 raise
             except Exception as e:
                 word_note = f"AI unavailable ({e}) - used the built-in word list instead"
+                log(f"⚠ AI unavailable: {e}. Using the built-in word list instead.")
                 spans = []
         if not spans and ai_reader is None and not asr_error:
             word_note = "words"
+            log("No AI model is set up (Settings → AI models), so the built-in word list judged what's said.")
     if transcript:
         spans = list(spans) + diction.lexicon_spans(transcript)
 
@@ -348,8 +373,20 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                 words_curve[j] = w
                 span_at[j] = sp
     has_words = bool(spans)
-    score = base + (1.4 * words_curve if has_words else 0)
-    score = _norm01(_smooth(score, 2.0))
+    has_ai = any(sp.source == "ai" for sp in spans)
+    if has_ai:
+        # content leads: the AI's rating decides, voice/energy break ties (and still surface
+        # passages the AI didn't read)
+        score = 2.4 * words_curve + 0.3 * base
+    elif has_words:
+        score = base + 1.2 * words_curve
+    else:
+        score = base
+    score = _smooth(score, 2.0)
+    # scale to 0..1 against the very best moment (not a percentile), so the top picks keep
+    # their order instead of all tying at 100
+    lo_s = float(np.percentile(score, 5)) if len(score) else 0.0
+    score = np.clip((score - lo_s) / max(1e-6, float(score.max()) - lo_s), 0, 1)
     if on_progress:
         on_progress(0.97, "Scoring moments…")
 
@@ -389,9 +426,14 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         while b < n - 1 and b - i < limit and score[b + 1] > thr:
             b += 1
         ev_start, ev_end = a * HOP, b * HOP
-        timing = [f"The excitement peaks at {_fmt(peak)}."]
-        if ev_end - ev_start >= 2:
-            timing.append(f"It starts building at {_fmt(ev_start)} and settles by {_fmt(ev_end)}.")
+        ai_sp = span_at.get(i)
+        if ai_sp is not None and getattr(ai_sp, "source", "") == "ai":
+            ev_start, ev_end = float(ai_sp.start), max(float(ai_sp.end), float(ai_sp.start) + 3)
+            timing = [f"Your AI marked {_fmt(ev_start)} – {_fmt(ev_end)} as the moment itself."]
+        else:
+            timing = [f"The excitement peaks at {_fmt(peak)}."]
+            if ev_end - ev_start >= 2:
+                timing.append(f"It starts building at {_fmt(ev_start)} and settles by {_fmt(ev_end)}.")
 
         # 2) add context: a lead-in so viewers see what led up to it, and a short tail
         start, end = ev_start - lead_in, ev_end + 2.0
@@ -515,4 +557,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     res = AnalysisResult(duration=dur, times=times, score=score, loudness=loud,
                          scene_times=scene_t, highlights=highlights, transcript=transcript or [])
     res.word_note = word_note
+    res.blocks = blocks if words_on else None
+    res.voice = vf
+    res.guidance = guidance
     return res

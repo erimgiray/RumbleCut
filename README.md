@@ -50,18 +50,14 @@ Options:
 
 **② Clip studio**
 - **How moments are judged** (the **Judge by** box):
-  - **Voice & energy** (fast):
-    - **pitch** compared with the speaker's own normal (upbeat and excited voices go up)
-    - **how animated** the voice is (pitch swings)
-    - **talking pace**
-    - **laughter**
-    - **loudness**, as a minor signal, so a loud ad read no longer counts as a highlight
-  - **Voice + what's said** (recommended):
-    1. The ~30 best-sounding stretches are transcribed on your PC.
-    2. Your AI model (Settings → AI models: Ollama, LM Studio or Claude) reads them and rates each one: funny, hot take, shocking, heated, emotional, quotable, story payoff. Each comes with a reason.
-    3. Without an AI model, a built-in word list (laughter, "no way", strong words…) is used.
-    4. If speech-to-text can't run, the scan falls back to voice only and tells you.
-  - **Voice + full transcript** (slowest): reads the whole stream, so it also catches gems delivered calmly.
+  - **Voice & energy only** (fast): pitch compared with the speaker's normal (upbeat = higher), how animated the voice is, talking pace, laughter, and loudness as a minor signal.
+  - **AI reads lively parts + samples** (recommended):
+    - **What gets read:** the ~20 liveliest stretches *and* a passage every few minutes across the whole stream are transcribed on your PC. Calm-but-great moments get read too.
+    - **How it's rated:** your AI model (Settings → AI models) rates each passage as funny, hot take, shocking, heated, emotional, quotable or story payoff.
+    - **How it ranks:** its rating **leads the ranking**, and voice energy is only a tie-breaker. An AI pick's clip is timed to the exact passage the AI chose.
+  - **AI reads everything** (slowest): the whole stream is read, so nothing is missed.
+- **🧠 Look for:** tell the AI what you want, e.g. "funny moments", "political hot takes", "anything about Amy Acton". Then press **↻ Ask AI again** to re-rank. It reuses the transcript from the last scan, so it's much faster than a new scan.
+- **🧠 AI log** (the tab next to Moments) shows live what the AI is reading and what it finds, with the quote and the reason. Use Copy log to keep it.
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
 - **How each clip's time range is chosen:**

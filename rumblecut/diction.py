@@ -93,12 +93,12 @@ SYSTEM = (
     "Answer only with JSON."
 )
 
-PROMPT = """Transcript excerpt (times are positions in the stream):
+PROMPT = """{guidance}Transcript excerpt (times are positions in the stream):
 {lines}
 
 Return the clip-worthy moments in this excerpt, if any, as:
 {{"moments": [{{"start": "m:ss", "end": "m:ss", "score": 1-10, "type": "funny | hot take | shocking | heated | emotional | quotable | story payoff", "why": "one short sentence saying what makes it good", "quote": "the key line, max 15 words"}}]}}
-Only include moments scoring 6 or more. Use start/end times from the transcript lines. Return {{"moments": []}} if nothing stands out."""
+Score how good a short clip each moment would make{fit}. Only include moments scoring 6 or more. Use start/end times from the transcript lines. Return {{"moments": []}} if nothing stands out."""
 
 
 def _window_lines(segs: list[Segment]) -> str:
@@ -107,7 +107,8 @@ def _window_lines(segs: list[Segment]) -> str:
 
 def ai_spans(windows: list[tuple[float, float, list[Segment]]],
              on_progress: Callable[[float, str], None] | None = None,
-             cancel: Callable[[], bool] | None = None, workers: int | None = None) -> list[Span]:
+             cancel: Callable[[], bool] | None = None, workers: int | None = None,
+             guidance: str = "", on_log: Callable[[str], None] | None = None) -> list[Span]:
     """windows: (start, end, segments) blocks of transcript. One AI call per block."""
     if workers is None:
         workers = 4 if ai.settings()["mode"] == "cloud" else 1
@@ -116,7 +117,13 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
     errors: list[str] = []
 
     def one(a, b, segs):
-        d = ai.complete_json(PROMPT.format(lines=_window_lines(segs)[:6000]), SYSTEM, max_tokens=600)
+        g = guidance.strip()
+        prompt = PROMPT.format(
+            guidance=(f"THE EDITOR IS LOOKING FOR: {g}\nPrefer moments that match this; rate others lower.\n\n"
+                      if g else ""),
+            fit=" - and how well it matches what the editor is looking for" if g else "",
+            lines=_window_lines(segs)[:6000])
+        d = ai.complete_json(prompt, SYSTEM, max_tokens=600)
         found = []
         for m in d.get("moments", []) or []:
             try:
@@ -134,6 +141,9 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
         return found
 
     done = 0
+    if on_log:
+        on_log(f"📖 {ai.describe()} is reading {len(todo)} passages"
+               + (f" - looking for: {guidance.strip()}" if guidance.strip() else "") + "…")
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futs = {pool.submit(one, *w): w for w in todo}
         for f in as_completed(futs):
@@ -142,12 +152,25 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
                     x.cancel()
                 raise Cancelled()
             done += 1
+            a, b, segs = futs[f]
             try:
-                spans.extend(f.result())
+                found = f.result()
+                spans.extend(found)
+                if on_log:
+                    if found:
+                        for sp in sorted(found, key=lambda x: x.start):
+                            on_log(f"✨ {_fmt(sp.start)}  {sp.label} {sp.score * 10:.0f}/10 - {sp.why}"
+                                   + (f"  “{sp.quote}”" if sp.quote else ""))
+                    else:
+                        on_log(f"·  {_fmt(a)} – {_fmt(b)}: nothing stood out")
             except ai.AIError as e:
                 errors.append(str(e))
+                if on_log:
+                    on_log(f"⚠  {_fmt(a)} – {_fmt(b)}: {e}")
             except Exception as e:      # a bad reply for one passage shouldn't stop the scan
                 errors.append(str(e))
+                if on_log:
+                    on_log(f"⚠  {_fmt(a)} – {_fmt(b)}: couldn't read the AI's answer ({e})")
             if on_progress:
                 on_progress(done / max(1, len(todo)), f"AI is reading what's said… ({done}/{len(todo)} passages)")
     if errors and not spans and len(errors) == len(todo):
