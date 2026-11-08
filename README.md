@@ -41,8 +41,13 @@ Options:
 
   Clip titles and `clips.csv` still show times in the **original stream**, so you can find each moment again.
 
+**⚡ Scan audio first (fastest for long streams):** paste the link and press **⚡ Scan audio first** instead of Download.
+1. Only the sound is downloaded, as an MP3. If Rumble has no separate audio track, the smallest video version is fetched and only its sound is kept.
+2. The best moments appear in the Clip studio. Press **▶ Play clip** to listen to each one, and tick the ones you like.
+3. Press **⬇ Get video for ticked moments**. Only those parts of the video are downloaded, with 3 seconds of padding either side. They become normal clips you can edit and export.
+
 **② Clip studio**
-- **Find highlights** scans the whole stream and draws an *excitement timeline*. The best moments become clips, ranked best first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'").
+- **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - Click a clip to preview it. Use **[ Set start / Set end ]** (keys `I` / `O`) to trim, drag clips to reorder them, and untick the ones you don't want.
 - **Effects per clip:**
   - speed (0.5× to 2×)

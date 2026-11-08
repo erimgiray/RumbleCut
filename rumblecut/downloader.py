@@ -153,8 +153,12 @@ def fetch_info(url: str) -> dict:
 def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None,
              ranges: list[tuple[float, float | None]] | None = None,
              on_progress: Callable[[float, str], None] | None = None,
-             cancel: Callable[[], bool] | None = None) -> DownloadResult:
+             cancel: Callable[[], bool] | None = None,
+             audio_only: bool = False) -> DownloadResult:
     """Download a video. With `ranges`, only those parts are fetched (one file per range).
+    With `audio_only`, just the sound is saved as an MP3 - a fraction of the size, used to
+    find the best moments before downloading any video. Rumble often has no separate
+    audio track; then the smallest video version is fetched and only its audio kept.
     Progress fraction is -1 when the size isn't known yet (show a busy bar)."""
     import yt_dlp
 
@@ -189,17 +193,21 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
             state["section"] += 1
             done_all = state["section"] >= max(1, n_sections)
             if done_all:
-                on_progress(1.0, "Finishing up…")
+                on_progress(-1.0 if audio_only else 1.0,
+                            "Converting to MP3…" if audio_only else "Finishing up…")
             else:   # next part starts; its size isn't known in advance -> busy bar
                 on_progress(-1.0, f"Part {state['section']} of {n_sections} saved  •  "
                                   f"downloading part {state['section'] + 1}…")
 
-    if ranges:
+    if audio_only:
+        tmpl = "%(title).85B [%(id)s] audio.%(ext)s"
+    elif ranges:
         tmpl = "%(title).80B [%(id)s] %(section_start)d-%(section_end)ds.%(ext)s"
     else:
         tmpl = "%(title).90B [%(id)s].%(ext)s"
     opts = {
-        "format": QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"]),
+        "format": ("ba/b[height<=360]/w" if audio_only
+                   else QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])),
         "outtmpl": str(out_dir / tmpl),
         "merge_output_format": "mp4",
         "progress_hooks": [hook],
@@ -214,6 +222,10 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
         "noplaylist": True,
         **_impersonation(),
     }
+    if audio_only:
+        opts.pop("merge_output_format", None)
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
+                                   "preferredquality": "5"}]          # VBR, about 130 kb/s
     if ranges:
         from yt_dlp.utils import download_range_func
         opts["download_ranges"] = download_range_func(
@@ -245,8 +257,10 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
     files = []
     for p in paths:
         pp = Path(p)
-        if not pp.exists() and pp.with_suffix(".mp4").exists():
-            pp = pp.with_suffix(".mp4")
+        for ext in ((".mp3",) if audio_only else ()) + (".mp4",):
+            if (not pp.exists() or pp.suffix != ext and audio_only) and pp.with_suffix(ext).exists():
+                pp = pp.with_suffix(ext)
+                break
         files.append(str(pp))
 
     duration = float(info.get("duration") or 0)

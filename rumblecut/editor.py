@@ -99,6 +99,8 @@ class Clip:
     caption_pos: str = "bottom"
     normalize_audio: bool = True
     transition: str = "Default"     # transition *into* this clip in a compilation
+    offset: float = 0.0             # where `source` starts on the project's timeline (video fetched
+                                    # just for this moment after an audio-first scan)
     overlays: list[ImageOverlay] = field(default_factory=list)
 
     @property
@@ -451,7 +453,8 @@ def export_project(project: Project, out_dir: str | Path,
                                      str(out_dir / f"{name}.jpg"), width=1280)
                 except Exception:
                     pass
-            rows.append([i, c.title, _ts(c.start + project.offset), _ts(c.end + project.offset),
+            rows.append([i, c.title, _ts(c.start + c.offset + project.offset),
+                         _ts(c.end + c.offset + project.offset),
                          f"{c.out_length:.1f}", c.score,
                          "; ".join(c.reasons), out.name])
             done += 1
