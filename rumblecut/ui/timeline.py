@@ -7,7 +7,12 @@ from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QToolTip, QWidget
 
 ACCENT = QColor("#85C742")
-USER = QColor("#f5b942")          # your picks (added by hand or from the Summary) - gold, not green
+USER = QColor("#f5b942")          # your picks from the Summary - gold, not green
+MANUAL = QColor("#5aa9e6")        # moments you made yourself (right-click / ＋ Add) - blue, dashed
+
+
+def _origin_colour(origin) -> QColor:
+    return {"user": USER, "manual": MANUAL}.get(origin, ACCENT)
 
 
 def fmt_time(t: float) -> str:
@@ -19,6 +24,10 @@ class Timeline(QWidget):
     seek = Signal(float)
     clip_clicked = Signal(int)
     zoom_changed = Signal(float)        # how far zoomed in (1 = whole stream)
+    add_at = Signal(float)              # right-click on empty space: make a new moment here
+    clip_menu = Signal(int, float, object)   # right-click on a moment: index, time, global position
+    clip_moved = Signal(int, float, float, str)       # live while dragging a moment (index, start, end, what)
+    clip_move_done = Signal(int, float, float, str)
 
     MAX_ZOOM_SPAN = 10.0                # seconds: the closest you can zoom
 
@@ -35,7 +44,9 @@ class Timeline(QWidget):
         self.time_fn = lambda t: t          # file time -> stream time for labels
         self.joins: list[float] = []        # where separately downloaded parts were joined
         self.playhead = 0.0
-        self.user: list[bool] = []          # which clips are your picks
+        self.user: list = []                # origin of each clip: "ai" | "user" | "manual"
+        self.limits: list[tuple[float, float]] = []      # how far each clip may go (its source file)
+        self._clip_drag = None              # (index, what, grab offset, press x, moved?)
         self.sections: list[tuple[float, float, float, str]] = []   # AI summary: start, end, interest, text
         self._dragging = False
         self.view = (0.0, 0.0)              # visible stretch (start, end); (0, duration) = zoomed out
@@ -159,21 +170,36 @@ class Timeline(QWidget):
             c = QColor(USER) if inter >= 0.6 else QColor("#6b7280")
             c.setAlpha(int(60 + 160 * max(0.0, min(1.0, inter))))
             p.fillRect(QRectF(x0 + 0.5, bottom - 4, max(1.5, x1 - x0 - 1), 4), c)
-        # highlight regions
-        for i, (s, e) in enumerate(self.clips):
+        # highlight regions - the selected one is drawn last, on top of the others
+        order = [i for i in range(len(self.clips)) if i != self.selected]
+        if 0 <= self.selected < len(self.clips):
+            order.append(self.selected)
+        for i in order:
+            s, e = self.clips[i]
             x0, x1 = self._x(s), self._x(e)
             sel = i == self.selected
-            base_col = USER if (i < len(self.user) and self.user[i]) else ACCENT
+            origin = self.user[i] if i < len(self.user) else "ai"
+            origin = "user" if origin is True else ("ai" if origin is False else origin)
+            base_col = _origin_colour(origin)
             col = QColor(base_col)
-            col.setAlpha(110 if sel else 50)
+            col.setAlpha(120 if sel else 50)
             p.fillRect(QRectF(x0, top, max(2, x1 - x0), h), col)
             edge = QColor(base_col)
             edge.setAlpha(255 if sel else 160)
-            p.setPen(QPen(edge, 2 if sel else 1))
+            pen = QPen(edge, 2 if sel else 1)
+            if origin == "manual":
+                pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
             p.drawRect(QRectF(x0, top, max(2, x1 - x0), h))
+            if sel:                                  # grips on the edges: drag to resize
+                p.setPen(Qt.NoPen)
+                p.setBrush(base_col)
+                for gx in (x0, x1):
+                    p.drawRoundedRect(QRectF(gx - 2.5, top + h / 2 - 9, 5, 18), 2, 2)
+                p.setBrush(Qt.NoBrush)
             p.setPen(QColor("#e5e7eb"))
-            star = "★" if (i < len(self.user) and self.user[i]) else ""
-            p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{star}{i + 1}")
+            mark = {"user": "★", "manual": "✎"}.get(origin, "")
+            p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{mark}{i + 1}")
         # score curve (just the visible stretch)
         sc = self.score
         xa, xb = 8.0, self.width() - 8.0
@@ -211,32 +237,105 @@ class Timeline(QWidget):
             p.fillRect(QRectF(8, 0, full, 3), QColor("#262a31"))
             p.fillRect(QRectF(x0, 0, max(3, x1 - x0), 3), QColor(ACCENT))
 
-    def mousePressEvent(self, ev):
-        if not self.duration or ev.button() != Qt.LeftButton:
-            return
-        t = self._t(ev.position().x())
-        for i, (s, e) in enumerate(self.clips):
+    def _clip_at(self, x: float):
+        """(index, what) under x: the selected moment's edges first, then the selected moment (it's on
+        top), then the others."""
+        t = self._t(x)
+        sel = self.selected
+        if 0 <= sel < len(self.clips):
+            s, e = self.clips[sel]
+            if abs(x - self._x(s)) <= 6:
+                return sel, "start"
+            if abs(x - self._x(e)) <= 6:
+                return sel, "end"
             if s <= t <= e:
+                return sel, "move"
+        for i in reversed(range(len(self.clips))):
+            s, e = self.clips[i]
+            if s <= t <= e:
+                return i, "move"
+        return None, None
+
+    def mousePressEvent(self, ev):
+        if not self.duration:
+            return
+        x = ev.position().x()
+        t = self._t(x)
+        if ev.button() == Qt.RightButton:
+            i, _ = self._clip_at(x)
+            if i is not None:
+                self.clip_menu.emit(i, t, ev.globalPosition().toPoint())
+            else:
+                self.add_at.emit(t)
+            return
+        if ev.button() != Qt.LeftButton:
+            return
+        i, what = self._clip_at(x)
+        if i is not None:
+            self._dragging = True
+            s, e = self.clips[i]
+            self._clip_drag = [i, what, t - s, x, False]
+            if i != self.selected:
                 self.clip_clicked.emit(i)
-                break
+            return
         self._dragging = True
         self.seek.emit(t)
 
+    def contextMenuEvent(self, ev):
+        ev.accept()                         # right-click adds a moment instead
+
     def mouseReleaseEvent(self, ev):
+        d = self._clip_drag
+        self._clip_drag = None
         self._dragging = False
+        if d is None:
+            return
+        i, what, _, _, moved = d
+        if moved and 0 <= i < len(self.clips):
+            s, e = self.clips[i]
+            self.clip_move_done.emit(i, s, e, what)
+        else:
+            self.seek.emit(self._t(ev.position().x()))          # a plain click still jumps there
 
     def mouseMoveEvent(self, ev):
         if not self.duration:
             return
-        t = self._t(ev.position().x())
-        if self._dragging and ev.buttons() & Qt.LeftButton:      # drag to scrub
+        x = ev.position().x()
+        t = self._t(x)
+        d = self._clip_drag
+        if d is not None and ev.buttons() & Qt.LeftButton:
+            i, what, grab, x0, moved = d
+            if not moved and abs(x - x0) < 4:
+                return
+            d[4] = True
+            if not (0 <= i < len(self.clips)):
+                return
+            s, e = self.clips[i]
+            lo, hi = self.limits[i] if i < len(self.limits) else (0.0, self.duration)
+            lo, hi = max(lo, self.view[0], 0.0), min(hi, self.view[1], self.duration)   # never off-screen
+            t = round(t * 10) / 10
+            if what == "start":
+                s = max(lo, min(t, e - 1.0))
+            elif what == "end":
+                e = min(hi, max(t, s + 1.0))
+            else:
+                ln = e - s
+                s = max(lo, min(hi - ln, round((self._t(x) - grab) * 10) / 10))
+                e = s + ln
+            self.clips[i] = (s, e)
+            self.update()
+            self.clip_moved.emit(i, s, e, what)
+            return
+        if self._dragging and ev.buttons() & Qt.LeftButton:      # drag empty space to scrub
             self.seek.emit(t)
             return
-        tip = fmt_time(self.time_fn(t))
-        for i, (s, e) in enumerate(self.clips):
-            if s <= t <= e and i < len(getattr(self, "tips", [])):
-                tip = f"<b>#{i + 1}</b> · {self.tips[i]}"
-                break
+        i, what = self._clip_at(x)
+        self.setCursor(Qt.SizeHorCursor if what in ("start", "end") else
+                       Qt.OpenHandCursor if what == "move" else Qt.ArrowCursor)
+        tip = fmt_time(self.time_fn(t)) + "  ·  right-click to add a moment here"
+        tip_more = "<br><i>Drag to move it · drag its edges to resize · right-click for options</i>"
+        if i is not None and i < len(getattr(self, "tips", [])):
+            tip = f"<b>#{i + 1}</b> · {self.tips[i]}{tip_more}"
         else:
             for a, b, inter, text in self.sections:
                 if a <= t <= b:
@@ -424,7 +523,7 @@ class ClipTimeline(QWidget):
                 path.lineTo(QPointF(self._x(ts[-1]), bottom))
                 p.fillPath(path, QColor(133, 199, 66, 45))
         # the moment
-        col = USER if self.user else ACCENT
+        col = _origin_colour(self.user) if isinstance(self.user, str) else (USER if self.user else ACCENT)
         xs, xe = self._x(self.start), self._x(self.end)
         fill = QColor(col)
         fill.setAlpha(70)
@@ -478,7 +577,7 @@ class ClipTimeline(QWidget):
             return
         what, grab = self._drag
         t = round(self._t(x) * 10) / 10            # 0.1 s steps
-        lo, hi = self.limits
+        lo, hi = max(self.limits[0], self.view[0]), min(self.limits[1], self.view[1])   # never off-screen
         if what == "start":
             self.start = max(lo, min(t, self.end - 1.0))
         elif what == "end":

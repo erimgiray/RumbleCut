@@ -10,14 +10,14 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPalette,
+from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QValidator)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
-    QStackedWidget, QStyle, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__, analysis, config, context_images, downloader, editor
@@ -198,6 +198,183 @@ def parse_secs(text: str):
     return int(round(total)) if pos and not t[pos:].strip() else None
 
 
+class RangesEditor(QWidget):
+    """Parts of the video to download: one row per part, each with “Starts from” and “Ends at”.
+    “To the end” makes a part run to the end of the video. Reads/writes the same text as before
+    ("1:05:00-1:20:00, 2:10:30-"), so saved settings and the downloader are unchanged."""
+    textChanged = Signal(str)
+    returnPressed = Signal()
+    editingFinished = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._rows: list[dict] = []
+        self._duration = 0.0
+        self._v = QVBoxLayout(self)
+        self._v.setContentsMargins(0, 0, 0, 0)
+        self._v.setSpacing(4)
+        self._rows_box = QVBoxLayout()
+        self._rows_box.setSpacing(4)
+        self._v.addLayout(self._rows_box)
+        self.btn_add = QPushButton("＋ Add another part")
+        self.btn_add.setObjectName("more")
+        self.btn_add.clicked.connect(lambda: (self._add_row(), self._rows[-1]["start"].setFocus()))
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.btn_add)
+        add_row.addStretch()
+        self._v.addLayout(add_row)
+        self._add_row()
+
+    # -- rows
+    def _add_row(self, start: str = "", end: str = "", to_end: bool = False):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        st = QLineEdit(start); st.setPlaceholderText("h:mm:ss"); st.setMaximumWidth(130)
+        en = QLineEdit(end); en.setPlaceholderText("h:mm:ss"); en.setMaximumWidth(170)
+        te = QPushButton("⏭ To the end")
+        te.setCheckable(True)
+        te.setToolTip("Download from “Starts from” right to the end of the video")
+        rm = QToolButton(); rm.setText("✖"); rm.setToolTip("Remove this part")
+        h.addWidget(QLabel("Starts from")); h.addWidget(st)
+        h.addSpacing(10)
+        h.addWidget(QLabel("Ends at")); h.addWidget(en); h.addWidget(te); h.addWidget(rm)
+        h.addStretch()
+        row = {"w": w, "start": st, "end": en, "to_end": te, "rm": rm}
+        self._rows.append(row)
+        self._rows_box.addWidget(w)
+        for le in (st, en):
+            le.textChanged.connect(lambda _: self.textChanged.emit(self.text()))
+            le.returnPressed.connect(self.returnPressed)
+            le.editingFinished.connect(self.editingFinished)
+        te.toggled.connect(lambda on, r=row: self._set_to_end(r, on))
+        rm.clicked.connect(lambda _=False, r=row: self._remove_row(r))
+        te.setChecked(to_end)
+        self._update_rm()
+        return row
+
+    def _set_to_end(self, row, on: bool):
+        en = row["end"]
+        if on:
+            row["saved_end"] = en.text()
+            en.blockSignals(True); en.clear(); en.blockSignals(False)
+            en.setPlaceholderText("end of video" + (f" ({fmt_time(self._duration)})" if self._duration else ""))
+        else:
+            en.setPlaceholderText("h:mm:ss")
+            en.setText(row.pop("saved_end", ""))
+        en.setEnabled(not on and self.isEnabled())
+        self.textChanged.emit(self.text())
+        self.editingFinished.emit()
+
+    def _remove_row(self, row):
+        if len(self._rows) <= 1:
+            for k in ("start", "end"):
+                row[k].clear()
+            row["to_end"].setChecked(False)
+            return
+        self._drop(row)
+        self._update_rm()
+        self.textChanged.emit(self.text())
+        self.editingFinished.emit()
+
+    def _drop(self, row):
+        self._rows.remove(row)
+        self._rows_box.removeWidget(row["w"])
+        row["w"].hide()
+        row["w"].setParent(None)
+        row["w"].deleteLater()
+
+    def _update_rm(self):
+        for r in self._rows:
+            r["rm"].setVisible(len(self._rows) > 1)
+
+    # -- QLineEdit-like API used by the rest of the window
+    def text(self) -> str:
+        parts = []
+        for r in self._rows:
+            a = r["start"].text().strip()
+            b = "" if r["to_end"].isChecked() else r["end"].text().strip()
+            if not a and not b and not r["to_end"].isChecked():
+                continue
+            parts.append(f"{a or '0'}-{b}")
+        return ", ".join(parts)
+
+    def setText(self, text: str):
+        for r in list(self._rows):
+            self._drop(r)
+        pieces = [p.strip() for p in (text or "").split(",") if p.strip()]
+        for p in pieces or [""]:
+            a, sep, b = p.partition("-")
+            self._add_row(a.strip(), b.strip(), to_end=bool(sep) and not b.strip())
+        self.textChanged.emit(self.text())
+
+    def set_duration(self, d: float):
+        self._duration = float(d or 0)
+        for r in self._rows:
+            if r["to_end"].isChecked():
+                r["end"].setPlaceholderText("end of video" + (f" ({fmt_time(self._duration)})" if self._duration else ""))
+
+    def setFocus(self):
+        if self._rows:
+            self._rows[0]["start"].setFocus()
+
+    def setEnabled(self, on: bool):
+        super().setEnabled(on)
+        for r in self._rows:
+            r["end"].setEnabled(on and not r["to_end"].isChecked())
+
+    def setPlaceholderText(self, _):
+        pass
+
+
+class StarDelegate(QStyledItemDelegate):
+    """Paints the item as usual, then five equal stars in its top-right corner, filled to the
+    rating (0-10: each star is 2 points, so 5 = two full stars and a half)."""
+    ROLE = Qt.UserRole + 1
+    SIZE = 13
+
+    @staticmethod
+    def _star(cx, cy, r):
+        import math
+        path = QPainterPath()
+        for k in range(10):
+            ang = -math.pi / 2 + k * math.pi / 5
+            rr = r if k % 2 == 0 else r * 0.45
+            pt = QPointF(cx + rr * math.cos(ang), cy + rr * math.sin(ang))
+            path.moveTo(pt) if k == 0 else path.lineTo(pt)
+        path.closeSubpath()
+        return path
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        rating = index.data(self.ROLE)
+        if rating is None:
+            return
+        n = max(0, min(10, int(rating)))
+        size, gap = self.SIZE, 3
+        total = 5 * size + 4 * gap
+        x0 = option.rect.right() - total - 8
+        cy = option.rect.top() + 6 + size / 2
+        dim = n < 4
+        fill = QColor("#6b7280") if dim else QColor("#f5b942")
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        for k in range(5):
+            cx = x0 + k * (size + gap) + size / 2
+            star = self._star(cx, cy, size / 2)
+            painter.setPen(QPen(fill, 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(star)
+            amount = max(0, min(2, n - 2 * k))            # 0 empty, 1 half, 2 full
+            if amount:
+                painter.save()
+                w = size if amount == 2 else size / 2
+                painter.setClipRect(QRectF(cx - size / 2, cy - size / 2, w, size))
+                painter.fillPath(star, fill)
+                painter.restore()
+        painter.restore()
+
+
 class PresetBox(QComboBox):
     """A dropdown of common values that you can also type into (e.g. "90 s", "2 min", "1:30").
     Behaves like a QSpinBox for the rest of the code: value(), setValue(), valueChanged."""
@@ -297,6 +474,20 @@ class MainWindow(QMainWindow):
         self._refresh_history()
         if config.load_settings().get("auto_update_check", True):
             QTimer.singleShot(3000, lambda: self.check_updates(silent=True))
+
+    @staticmethod
+    def _cancel_shown(btn, on: bool):
+        """Cancel buttons only appear while there's something to cancel."""
+        btn.setEnabled(on)
+        btn.setVisible(on)
+        if on:
+            btn.setText("Cancel")
+
+    def _cancelling(self, w, btn, status_lbl):
+        w.cancel()
+        btn.setEnabled(False)
+        btn.setText("Stopping…")
+        status_lbl.setText("Stopping - finishing the step in progress…")
 
     def _show_toast(self, msg: str):
         if not msg:
@@ -423,8 +614,7 @@ class MainWindow(QMainWindow):
         pg = QGridLayout(part)
         self.part_only = QCheckBox("Only download part of the video")
         self.part_only.setToolTip("Skip the parts you don't need - much faster for long streams")
-        self.ranges_edit = QLineEdit()
-        self.ranges_edit.setPlaceholderText("e.g.  1:05:00-1:20:00, 2:10:30-2:16:00")
+        self.ranges_edit = RangesEditor()
         self.ranges_edit.setEnabled(False)
         self.ranges_edit.returnPressed.connect(self.start_download)
         self.ranges_info = QLabel("")             # only shown to confirm the parts or flag a typo
@@ -442,7 +632,7 @@ class MainWindow(QMainWindow):
         self.part_only.toggled.connect(lambda on: config.save_settings({"part_only": on}))
         self.ranges_edit.editingFinished.connect(
             lambda: config.save_settings({"part_ranges": self.ranges_edit.text().strip()}))
-        pg.addWidget(self.part_only, 0, 0)
+        pg.addWidget(self.part_only, 0, 0, Qt.AlignTop)
         pg.addWidget(self.ranges_edit, 0, 1)
         pg.addWidget(self.ranges_info, 1, 1)
         pg.setColumnStretch(1, 1)
@@ -452,7 +642,9 @@ class MainWindow(QMainWindow):
         self.dl_progress.setTextVisible(True)
         self.dl_progress.setFormat("")
         self.btn_dl_cancel = QPushButton("Cancel")
-        self.btn_dl_cancel.setEnabled(False)
+        self.btn_dl_cancel.setObjectName("danger")
+        _keep = self.btn_dl_cancel.sizePolicy(); _keep.setRetainSizeWhenHidden(True); self.btn_dl_cancel.setSizePolicy(_keep)
+        self._cancel_shown(self.btn_dl_cancel, False)
         prow.addWidget(self.dl_progress, 1)
         prow.addWidget(self.btn_dl_cancel)
         v.addLayout(prow)
@@ -628,7 +820,7 @@ class MainWindow(QMainWindow):
         self.link_info.setText("Checking…")
         w = Worker(lambda url, on_progress=None, cancel=None: downloader.fetch_info(url), url)
         w.done.connect(lambda info: setattr(self, "_link_duration", float(info.get("duration") or 0))
-                       or self._update_ranges_info())
+                       or self.ranges_edit.set_duration(self._link_duration) or self._update_ranges_info())
         w.done.connect(lambda info: self.link_info.setText(
             f"<b>{info.get('title', '?')}</b> — {info.get('uploader', '')} — "
             f"{fmt_time(info.get('duration') or 0)}"
@@ -666,7 +858,7 @@ class MainWindow(QMainWindow):
             scope = "Audio of the whole stream" if audio_only else "The whole video"
         self.btn_dl.setEnabled(False)
         self.btn_scan.setEnabled(False)
-        self.btn_dl_cancel.setEnabled(True)
+        self._cancel_shown(self.btn_dl_cancel, True)
         self.dl_progress.setValue(0)
         self.dl_status.setText("Starting download…")
         w = Worker(downloader.download, url, self.quality.currentText(), config.download_dir(), ranges,
@@ -674,7 +866,7 @@ class MainWindow(QMainWindow):
         self.dl_status.setText(scope + "  ·  starting…"
                                + ("   (to fetch only some parts, tick “Only download part of the video”)"
                                   if not ranges else ""))
-        self.btn_dl_cancel.clicked.connect(w.cancel)
+        self.btn_dl_cancel.clicked.connect(lambda: self._cancelling(w, self.btn_dl_cancel, self.dl_status))
 
         def prog(f, msg):
             if f < 0:                       # size unknown -> moving "busy" bar
@@ -729,7 +921,7 @@ class MainWindow(QMainWindow):
         def reset():
             self.btn_dl.setEnabled(True)
             self.btn_scan.setEnabled(True)
-            self.btn_dl_cancel.setEnabled(False)
+            self._cancel_shown(self.btn_dl_cancel, False)
             if self.dl_progress.maximum() == 0:
                 self.dl_progress.setRange(0, 1000)
                 self.dl_progress.setValue(0)
@@ -834,7 +1026,10 @@ class MainWindow(QMainWindow):
         self.an_progress.valueChanged.connect(
             lambda v: self.an_progress.setFormat(f"{v / 10:.0f}%" if v > 0 and self.an_progress.maximum() else ""))
         self.an_status = ElidedLabel(""); self.an_status.setObjectName("muted")
-        self.btn_an_cancel = QPushButton("Cancel"); self.btn_an_cancel.setEnabled(False)
+        self.btn_an_cancel = QPushButton("Cancel")
+        self.btn_an_cancel.setObjectName("danger")
+        _keep = self.btn_an_cancel.sizePolicy(); _keep.setRetainSizeWhenHidden(True); self.btn_an_cancel.setSizePolicy(_keep)
+        self._cancel_shown(self.btn_an_cancel, False)
         self.an_progress.setMinimumWidth(120)
         prow.addWidget(self.an_progress, 2); prow.addWidget(self.an_status, 3); prow.addWidget(self.btn_an_cancel)
         v.addLayout(prow)
@@ -858,6 +1053,10 @@ class MainWindow(QMainWindow):
         self.timeline = Timeline()
         self.timeline.seek.connect(self.scrub_to)
         self.timeline.clip_clicked.connect(lambda i: self.clip_list.setCurrentRow(i))
+        self.timeline.add_at.connect(self.add_clip_at)
+        self.timeline.clip_menu.connect(self._timeline_clip_menu)
+        self.timeline.clip_moved.connect(self._timeline_clip_moved)
+        self.timeline.clip_move_done.connect(self._timeline_clip_done)
         self.timeline.setToolTip("")
         trow = QHBoxLayout()
         trow.setSpacing(4)
@@ -925,9 +1124,6 @@ class MainWindow(QMainWindow):
         self.left_tabs = QTabWidget()
         self.left_tabs.setObjectName("lefttabs")
         moments_page = QWidget(); lv = QVBoxLayout(moments_page); lv.setContentsMargins(0, 4, 0, 0)
-        hint = QLabel("Tick to export · drag to reorder · hover for why")
-        hint.setObjectName("muted")
-        lv.addWidget(hint)
         self.clip_list = QListWidget()
         self.clip_list.setIconSize(QSize(128, 72))
         self.clip_list.setSpacing(2)
@@ -958,12 +1154,9 @@ class MainWindow(QMainWindow):
         lgv.addLayout(lrow)
         self.left_tabs.addTab(log_page, "AI log")
         sum_page = QWidget(); smv = QVBoxLayout(sum_page); smv.setContentsMargins(0, 4, 0, 0)
-        sh = QLabel("What's said, section by section · tick the ones you like → add to Moments")
-        sh.setObjectName("muted")
-        sh.setWordWrap(True)
-        smv.addWidget(sh)
         self.sum_list = QListWidget()
         self.sum_list.setObjectName("summary")
+        self.sum_list.setItemDelegate(StarDelegate(self.sum_list))
         self.sum_list.setWordWrap(True)
         self.sum_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sum_list.itemChanged.connect(lambda *_: self._update_sum_buttons())
@@ -1290,7 +1483,7 @@ class MainWindow(QMainWindow):
         if not self.project.source:
             QMessageBox.information(self, APP_NAME, "Load a video first (tab 1, Get video).")
             return
-        ai_clips = [c for c in self.project.clips if c.origin != "user"]
+        ai_clips = [c for c in self.project.clips if c.origin == "ai"]
         ticked_fetched = [c for c in ai_clips if c.source != self.project.source]
         mine = len(self.project.clips) - len(ai_clips)
         if ai_clips and not (reuse and not ticked_fetched) and QMessageBox.question(
@@ -1345,8 +1538,8 @@ class MainWindow(QMainWindow):
         holder.append(w)
         w.log.connect(self._log)
         self.btn_analyse.setEnabled(False)
-        self.btn_an_cancel.setEnabled(True)
-        self.btn_an_cancel.clicked.connect(w.cancel)
+        self._cancel_shown(self.btn_an_cancel, True)
+        self.btn_an_cancel.clicked.connect(lambda: self._cancelling(w, self.btn_an_cancel, self.an_status))
         w.progress.connect(lambda f, m: (self.an_progress.setRange(0, 1000), self.an_progress.setValue(int(f * 1000)),
                                          self.an_status.setText(m)))
         w.done.connect(self._analysis_done)
@@ -1356,7 +1549,7 @@ class MainWindow(QMainWindow):
         def reset():
             self.btn_analyse.setEnabled(True)
             self.btn_reask.setEnabled(bool(self.result is not None and getattr(self.result, "blocks", None)))
-            self.btn_an_cancel.setEnabled(False)
+            self._cancel_shown(self.btn_an_cancel, False)
             try:
                 self.btn_an_cancel.clicked.disconnect()
             except (RuntimeError, TypeError):
@@ -1369,7 +1562,7 @@ class MainWindow(QMainWindow):
         self.result = res
         self.candidates = list(res.highlights)       # already ranked best first
         self._shown_total = 0
-        self.project.clips = [c for c in self.project.clips if c.origin == "user"]   # your picks stay
+        self.project.clips = [c for c in self.project.clips if c.origin != "ai"]   # your picks stay
         new_secs = [x.as_dict() for x in getattr(res, "sections", []) or []]
         if new_secs or (getattr(res, "blocks", None) is not None and getattr(res, "word_note", "") == "ai"):
             self.project.sections = new_secs
@@ -1478,9 +1671,12 @@ class MainWindow(QMainWindow):
             if t:
                 it.setIcon(QIcon(QPixmap(t)))
             it.setData(Qt.UserRole, id(c))
-            if c.origin == "user":                  # your picks: gold, so they don't mix with the AI's
+            if c.origin == "user":                # your picks from the Summary: gold
                 it.setBackground(QBrush(QColor("#2a2414")))
                 it.setForeground(QBrush(QColor("#f5d48a")))
+            elif c.origin == "manual":            # moments you made yourself: blue
+                it.setBackground(QBrush(QColor("#16222e")))
+                it.setForeground(QBrush(QColor("#a9d1f5")))
             self.clip_list.addItem(it)
         self.clip_list.blockSignals(False)
         self._sync_timeline(row if keep_row else -1)
@@ -1493,8 +1689,9 @@ class MainWindow(QMainWindow):
         self._mark_added_sections()
 
     def _sync_timeline(self, row: int):
+        self.timeline.limits = [self._clip_limits(c) for c in self.project.clips]
         self.timeline.set_clips(self._spans(), row, [self._why_html(c) for c in self.project.clips],
-                                [c.origin == "user" for c in self.project.clips])
+                                [c.origin for c in self.project.clips])
 
     def _rows_moved(self, *_):
         by_id = {id(c): c for c in self.project.clips}
@@ -1531,7 +1728,7 @@ class MainWindow(QMainWindow):
         self.i_start.setValue(c.start + c.offset)
         self.i_end.setValue(c.end + c.offset)
         self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported")
-        self.i_why.setText(("★ Your pick · " if c.origin == "user" else "") + (" · ".join(c.reasons) or "Added manually"))
+        self.i_why.setText({"user": "★ Your pick · ", "manual": "✎ Made by you · "}.get(c.origin, "") + (" · ".join(c.reasons) or "Added manually"))
         self.i_why.setToolTip(self._why_html(c))
         self.i_why.setText(self.i_why.text() + "   ⓘ")
         self.i_speed.setCurrentText(f"{c.speed:g}×")
@@ -1581,8 +1778,9 @@ class MainWindow(QMainWindow):
         reason = c.reasons[0] if c.reasons else "Manual clip"
         a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream_end(c.end + c.offset)
         tag = "   🔊 audio only" if not self._has_video(c.source) else ("   🎬 video fetched" if c.offset else "")
-        if c.origin == "user":
-            return (f"★ {i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
+        if c.origin != "ai":
+            mark = "✎" if c.origin == "manual" else "★"
+            return (f"{mark} {i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
                     f"your pick{tag}\n{reason}")
         return (f"{i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
                 f"score {c.score:.0f}{tag}\n{reason}")
@@ -1622,7 +1820,7 @@ class MainWindow(QMainWindow):
     def _user_insert_row(self) -> int:
         """Your picks stay together at the top of Moments, newest last."""
         r = 0
-        while r < len(self.project.clips) and self.project.clips[r].origin == "user":
+        while r < len(self.project.clips) and self.project.clips[r].origin != "ai":
             r += 1
         return r
 
@@ -1638,8 +1836,8 @@ class MainWindow(QMainWindow):
             r_ = self.result
             self.clip_tl.set_clip(c.start + c.offset, c.end + c.offset, lim,
                                   getattr(r_, "times", None), getattr(r_, "score", None),
-                                  user=c.origin == "user", keep_view=keep_view)
-            who = "★ Your pick" if c.origin == "user" else f"Moment {r + 1}"
+                                  user=c.origin, keep_view=keep_view)
+            who = {"user": "★ Your pick", "manual": "✎ Your moment"}.get(c.origin, f"Moment {r + 1}")
             self.clip_tl_title.setText(f"{who} - {c.title}   ·   drag the handles for the exact start and end, "
                                        "drag the middle to move it, click outside to jump there")
         target = self._clip_tl_h if want else 0
@@ -1687,15 +1885,15 @@ class MainWindow(QMainWindow):
         for x in secs:
             a, b = self.project.to_stream(x["start"]), self.project.to_stream_end(x["end"])
             n = round(x["interest"] * 10)
-            dots = "●" * max(0, min(5, round(n / 2))) + "○" * (5 - max(0, min(5, round(n / 2))))
-            it = QListWidgetItem(f"{fmt_time(a)} – {fmt_time(b)}   {dots} {n}/10\n{x['summary']}")
+            it = QListWidgetItem(f"{fmt_time(a)} – {fmt_time(b)}\n{x['summary']}")
+            it.setData(StarDelegate.ROLE, n)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Unchecked)
             if x["interest"] < 0.4:
                 it.setForeground(QBrush(QColor("#6b7280")))
                 it.setToolTip("The AI found little of interest here (filler, a transition, chat-reading…)")
             else:
-                it.setToolTip(f"{fmt_time(a)} – {fmt_time(b)} ({(b - a) / 60:.1f} min)<br>{x['summary']}"
+                it.setToolTip(f"{fmt_time(a)} – {fmt_time(b)} ({(b - a) / 60:.1f} min) · rated {n}/10<br>{x['summary']}"
                               "<br><i>Click to listen · double-click to add to Moments</i>")
             self.sum_list.addItem(it)
         self.sum_list.blockSignals(False)
@@ -1708,7 +1906,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "sum_list"):
             return
         picks = {(round(c.start, 1), round(c.end, 1)) for c in self.project.clips
-                 if c.origin == "user" and c.source == self.project.source}
+                 if c.origin != "ai" and c.source == self.project.source}
         self.sum_list.blockSignals(True)
         for i, x in enumerate(self.project.sections or []):
             it = self.sum_list.item(i)
@@ -1747,7 +1945,7 @@ class MainWindow(QMainWindow):
         rows = [r for r in rows if 0 <= r < len(secs)]
         if not rows or not self.project.source:
             return
-        have = {(round(c.start, 1), round(c.end, 1)) for c in self.project.clips if c.origin == "user"}
+        have = {(round(c.start, 1), round(c.end, 1)) for c in self.project.clips if c.origin != "ai"}
         at = self._user_insert_row()
         added = 0
         for r in rows:
@@ -1783,6 +1981,99 @@ class MainWindow(QMainWindow):
         self._show_toast(f"★ Added {added} section{'s' if added != 1 else ''} to the top of Moments as your pick"
                          f"{'s' if added != 1 else ''}")
 
+    def add_clip_at(self, t: float):
+        """Right-click on the timeline: a new moment of your own, centred where you clicked."""
+        if not self.project.source:
+            return
+        dur = self.info.duration if self.info else t + 30
+        L = min(self.max_len.value(), max(self.min_len.value(), 20))
+        s0 = max(0.0, min(t - L / 2, dur - L))
+        c = editor.Clip(source=self.project.source, start=round(s0, 1), end=round(min(dur, s0 + L), 1),
+                        title=f"My moment - {fmt_time(self.project.to_stream(t)).replace(':', '.')}",
+                        reasons=["Made by you on the timeline"], origin="manual",
+                        timing=["You placed it with a right-click on the timeline - drag it or its edges to adjust."])
+        r = self._user_insert_row()
+        self.project.clips.insert(r, c)
+        self._fill_clip_list()
+        self.clip_list.setCurrentRow(r)
+        self._update_audio_banner()
+        self._show_toast("✎ New moment added - drag it on the timeline to move it")
+
+    def _timeline_clip_menu(self, i: int, t: float, gpos):
+        """Right-click on a moment in the timeline."""
+        if not (0 <= i < len(self.project.clips)):
+            return
+        self.clip_list.setCurrentRow(i)
+        c = self.project.clips[i]
+        pos_in = t - c.offset                       # clicked spot in the clip's own file time
+        inside = c.start + 1.0 < pos_in < c.end - 1.0
+        here = fmt_time(self.project.to_stream(t))
+        m = QMenu(self)
+        m.addAction("▶  Play this moment", self.play_clip)
+        m.addSeparator()
+        a = m.addAction(f"✂  Cut the start - begin at {here}", lambda: self._trim_clip(c, "start", pos_in))
+        a.setEnabled(inside)
+        a = m.addAction(f"✂  Cut the end - stop at {here}", lambda: self._trim_clip(c, "end", pos_in))
+        a.setEnabled(inside)
+        a = m.addAction(f"⫽  Split into two at {here}", lambda: self._split_clip(c, pos_in))
+        a.setEnabled(inside)
+        m.addSeparator()
+        m.addAction("⧉  Duplicate", self.duplicate_clip)
+        m.addAction("☐  Untick (don't export)" if c.enabled else "☑  Tick (export it)",
+                    lambda: self.clip_list.item(self.project.clips.index(c)).setCheckState(
+                        Qt.Unchecked if c.enabled else Qt.Checked))
+        m.addSeparator()
+        m.addAction("🗑  Delete this moment", self.remove_clip)
+        self._exec_menu(m, gpos)
+
+    def _exec_menu(self, m, gpos):
+        m.exec(gpos)
+
+    def _trim_clip(self, c, which: str, t: float):
+        if c not in self.project.clips:
+            return
+        r = self.project.clips.index(c)
+        self.clip_list.setCurrentRow(r)
+        if which == "start":
+            c.start = round(t, 2)
+        else:
+            c.end = round(t, 2)
+        self.select_clip(r)                          # refresh boxes + moment timeline
+        self._update_item_text(r)
+        self._show_toast("✂ Trimmed")
+
+    def _split_clip(self, c, t: float):
+        if c not in self.project.clips:
+            return
+        from dataclasses import replace
+        r = self.project.clips.index(c)
+        second = replace(c, start=round(t, 2), title=c.title + " (2)", overlays=[replace(o) for o in c.overlays],
+                         reasons=list(c.reasons), why=list(c.why), timing=list(c.timing))
+        c.end = round(t, 2)
+        self.project.clips.insert(r + 1, second)
+        self._fill_clip_list()
+        self.clip_list.setCurrentRow(r)
+        self._show_toast("⫽ Split into two moments")
+
+    def _clip_limits(self, c):
+        if c.source == self.project.source:
+            return (0.0, self.info.duration if self.info else 1e9)
+        return (c.offset, c.offset + (self._src_duration(c.source) or 1e9))
+
+    def _timeline_clip_moved(self, i: int, a: float, b: float, what: str):
+        if not (0 <= i < len(self.project.clips)):
+            return
+        if i != self.clip_list.currentRow():
+            self.clip_list.setCurrentRow(i)
+        self._clip_span_dragged(a, b, what)
+        c = self.project.clips[i]
+        self._show_clip_timeline(c, keep_view=True)
+
+    def _timeline_clip_done(self, i: int, a: float, b: float, what: str):
+        if 0 <= i < len(self.project.clips) and i == self.clip_list.currentRow():
+            self._clip_span_committed(a, b, what)
+            self._show_clip_timeline(self.project.clips[i], keep_view=False)
+
     def add_clip_here(self):
         if not self.project.source:
             return
@@ -1792,7 +2083,7 @@ class MainWindow(QMainWindow):
         s = max(0.0, t - L * 0.3)
         c = editor.Clip(source=self.project.source, start=round(s, 1), end=round(min(dur, s + L), 1),
                         title=f"My clip - {fmt_time(self.project.to_stream(t)).replace(':', '.')}",
-                        reasons=["Added by you"], origin="user")
+                        reasons=["Added by you"], origin="manual")
         r = self._user_insert_row()
         self.project.clips.insert(r, c)
         self._fill_clip_list()
@@ -1804,7 +2095,7 @@ class MainWindow(QMainWindow):
             return
         from dataclasses import replace
         d = replace(c, title=c.title + " (copy)", overlays=[replace(o) for o in c.overlays],
-                    reasons=list(c.reasons), origin="user")
+                    reasons=list(c.reasons), origin="manual")
         r = self.clip_list.currentRow() + 1
         self.project.clips.insert(r, d)
         self._fill_clip_list()
@@ -2061,8 +2352,8 @@ class MainWindow(QMainWindow):
         self.btn_get_video.setEnabled(False)
         self.an_status.setText(f"Fetching video for {len(targets)} moment(s)…")
         w = Worker(downloader.download, url, quality, config.download_dir(), ranges)
-        self.btn_an_cancel.setEnabled(True)
-        self.btn_an_cancel.clicked.connect(w.cancel)
+        self._cancel_shown(self.btn_an_cancel, True)
+        self.btn_an_cancel.clicked.connect(lambda: self._cancelling(w, self.btn_an_cancel, self.an_status))
 
         def prog(f, m):
             if f < 0:
@@ -2099,7 +2390,7 @@ class MainWindow(QMainWindow):
 
         def reset():
             self.an_progress.setRange(0, 1000)
-            self.btn_an_cancel.setEnabled(False)
+            self._cancel_shown(self.btn_an_cancel, False)
             try:
                 self.btn_an_cancel.clicked.disconnect()
             except (RuntimeError, TypeError):
@@ -3075,6 +3366,7 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTe
 QPushButton, QToolButton {{ background: #2a2e36; border: 1px solid #353a44; border-radius: 6px; padding: 6px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background: #333844; }}
 QPushButton:disabled {{ color: #5b6370; background: #20232a; }}
+QPushButton:checked {{ background: #2d3a22; border-color: {ACCENT}; color: #fff; }}
 QPushButton#primary {{ background: {ACCENT}; color: #0b0d10; font-weight: 700; border: none; padding: 7px 18px; }}
 QPushButton#primary:hover {{ background: #9bd85c; }}
 QPushButton#danger {{ color: #fca5a5; border-color: #7f1d1d; }}

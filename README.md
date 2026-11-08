@@ -32,9 +32,8 @@ Options:
 ## Using it
 
 **① Get video:** paste a `rumble.com/...` link, pick a quality, and click **Download**. Large streams resume if interrupted. You can also open any video already on your PC.
-- **Only download part of the video:** tick the box and type the ranges you want, e.g. `1:05:00-1:20:00, 2:10:30-2:16:00`.
+- **Only download part of the video:** tick the box and fill in **Starts from** and **Ends at** (e.g. `1:05:00` and `1:20:00`). Press **⏭ To the end** to run that part to the end of the video, and **＋ Add another part** for more parts.
   - Times can be `h:mm:ss`, `mm:ss`, plain seconds, or `1h5m`.
-  - Leave the end blank (`2:30:00-`) to mean "to the end".
   - Overlapping ranges are merged.
   - Each range is saved as its own file, and only those bytes are fetched.
   - Press **Check link** first to see the video's length and how much you're skipping.
@@ -62,12 +61,12 @@ The **Only download part of the video** box and its times are remembered between
   - **AI reads everything** (slowest): the whole stream is read, so nothing is missed.
 - **🧠 Look for:** tell the AI what you want, e.g. "funny moments", "political hot takes", "anything about Amy Acton". Then press **↻ Ask AI again** to re-rank. It reuses the transcript from the last scan, so it's much faster than a new scan.
 - **AI log** (the tab next to Moments) shows live what the AI is reading and what it finds, with the quote and the reason. Use Copy log to keep it.
-- **Summary** (the tab next to AI log): the AI describes each section it reads, e.g. "2:01:00 – 2:14:00 · argues with a viewer about the Vivek ad", with an interest rating (●●●●○ 8/10).
+- **Summary** (the tab next to AI log): the AI describes each section it reads, e.g. "2:01:00 – 2:14:00 · argues with a viewer about the Vivek ad", with an interest rating out of five stars (each star is 2 points, so 5/10 shows 2½ stars).
   - Neighbouring sections that are the same conversation are joined into one. Sections never run across two separately downloaded parts.
   - The ratings steer the ranking: moments come from the interesting sections, and transitions, filler, chat-reading, technical trouble and coughing are pushed down. Each moment's hover text says which section it's part of.
   - The sections also show as a thin strip along the bottom of the timeline (gold = interesting, grey = filler).
   - Click a section to listen to it. Tick the ones you like and press **★ Add to Moments** (or double-click one) to add them to the top of Moments as **your picks**.
-- **Your picks** (sections you add, clips you add with **＋ Add** or **⧉ Copy**) are marked ★ and shown in gold, at the top of Moments and on the timeline, so they don't mix with the app's guesses. They're kept when you run **Find highlights** or **↻ Ask AI again**.
+- **Your picks:** sections you add from the Summary are marked ★ and shown in gold; moments you make yourself (right-click on the timeline, **＋ Add**, **⧉ Copy**) are marked ✎ and shown in blue. Both sit at the top of Moments, so they don't mix with the app's guesses. They're kept when you run **Find highlights** or **↻ Ask AI again**.
 - **Show / Min length / Max length / Gap** are dropdowns with common choices (5 / 10 / 15 moments; 5 to 30 min; 0 / 10 / 20 / 30 seconds). You can also type your own value, e.g. `45 s`, `2 min` or `1:30`.
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
@@ -76,6 +75,7 @@ The **Only download part of the video** box and its times are remembered between
   2. It starts a few seconds earlier, so viewers get the build-up, and ends 2 s after the energy settles.
   3. It's kept between your **Min length** and **Max length**. Short moments get extra lead-in; long ones are trimmed around their peak.
   4. Both ends are moved to natural pauses (or scene cuts), so nobody is cut off mid-word.
+- **On the timeline:** right-click empty space to add a moment of your own there (shown blue and dashed, ✎). Click a moment to select it; the selected one is drawn on top, and you can drag it to move it or drag its edges to resize it (it can't go off the visible part). Right-click a moment for options: play it, cut its start or end at the clicked spot, split it in two, duplicate, untick or delete it.
 - **Zoom the timeline:** scroll up on it to zoom in (around the mouse), down to zoom out, or use the **＋ / － / Fit** buttons beside it. Shift+scroll moves left and right while zoomed; a green bar along the top shows which part you're looking at, and the view follows the playhead and the moment you select.
 - **Scrubber:** the bar under the player shows where you are; drag it (or drag across the main timeline) to move anywhere. Blue parts have video; the rest is audio only. Where there's nothing to show (an audio-only part, or nothing loaded), the player shows an icon and a note explaining why, and you get a notice when you scrub out of a part with video.
 - **The moment's own timeline:** click a moment and a zoomed timeline for it slides open under the main one. Drag its handles to set the exact start and end (in 0.1 s steps), drag the middle to move the whole moment, or click outside it to jump there. You hear the edge as you drag it.

@@ -8,7 +8,7 @@ Two scorers:
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Callable
 
@@ -196,38 +196,44 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
     if on_log:
         on_log(f"📖 {ai.describe()} is reading {len(todo)} passages"
                + (f" - looking for: {guidance.strip()}" if guidance.strip() else "") + "…")
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futs = {pool.submit(one, *w): w for w in todo}
-        for f in as_completed(futs):
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    futs = {pool.submit(one, *w): w for w in todo}
+    pending = set(futs)
+    try:
+        while pending:
+            # wake up often so Cancel works within a moment, not after the AI's current answer
+            finished, pending = wait(pending, timeout=0.3, return_when=FIRST_COMPLETED)
             if cancel and cancel():
-                for x in futs:
-                    x.cancel()
                 raise Cancelled()
-            done += 1
-            a, b, segs = futs[f]
-            try:
-                found, secs = f.result()
-                spans.extend(found)
-                sections.extend(secs)
-                if on_log:
-                    for sc in secs:
-                        on_log(f"📝 {st(sc.start)} – {st(sc.end)}  {sc.summary}  ({sc.interest * 10:.0f}/10)")
-                    if found:
-                        for sp in sorted(found, key=lambda x: x.start):
-                            on_log(f"✨ {st(sp.start)}  {sp.label} {sp.score * 10:.0f}/10 - {sp.why}"
-                                   + (f"  “{sp.quote}”" if sp.quote else ""))
-                    else:
-                        on_log(f"·  {st(a)} – {st(b)}: nothing stood out")
-            except ai.AIError as e:
-                errors.append(str(e))
-                if on_log:
-                    on_log(f"⚠  {st(a)} – {st(b)}: {e}")
-            except Exception as e:      # a bad reply for one passage shouldn't stop the scan
-                errors.append(str(e))
-                if on_log:
-                    on_log(f"⚠  {st(a)} – {st(b)}: couldn't read the AI's answer ({e})")
-            if on_progress:
-                on_progress(done / max(1, len(todo)), f"AI is reading what's said… ({done}/{len(todo)} passages)")
+            for f in finished:
+                done += 1
+                a, b, segs = futs[f]
+                try:
+                    found, secs = f.result()
+                    spans.extend(found)
+                    sections.extend(secs)
+                    if on_log:
+                        for sc in secs:
+                            on_log(f"📝 {st(sc.start)} – {st(sc.end)}  {sc.summary}  ({sc.interest * 10:.0f}/10)")
+                        if found:
+                            for sp in sorted(found, key=lambda x: x.start):
+                                on_log(f"✨ {st(sp.start)}  {sp.label} {sp.score * 10:.0f}/10 - {sp.why}"
+                                       + (f"  “{sp.quote}”" if sp.quote else ""))
+                        else:
+                            on_log(f"·  {st(a)} – {st(b)}: nothing stood out")
+                except ai.AIError as e:
+                    errors.append(str(e))
+                    if on_log:
+                        on_log(f"⚠  {st(a)} – {st(b)}: {e}")
+                except Exception as e:      # a bad reply for one passage shouldn't stop the scan
+                    errors.append(str(e))
+                    if on_log:
+                        on_log(f"⚠  {st(a)} – {st(b)}: couldn't read the AI's answer ({e})")
+                if on_progress:
+                    on_progress(done / max(1, len(todo)), f"AI is reading what's said… ({done}/{len(todo)} passages)")
+    finally:
+        # don't wait for an answer that's still coming in after Cancel - just stop asking for more
+        pool.shutdown(wait=False, cancel_futures=True)
     if errors and not spans and not sections and len(errors) == len(todo):
         raise ai.AIError(errors[0])
     sections.sort(key=lambda x: x.start)
