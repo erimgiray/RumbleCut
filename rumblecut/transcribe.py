@@ -59,6 +59,15 @@ def _load_model(size: str, on_progress=None):
     raise RuntimeError(f"Couldn't load the speech model: {last}")
 
 
+def _read_wav(path):
+    """16 kHz mono 16-bit WAV -> float32 numpy array, the format Whisper expects."""
+    import wave
+    import numpy as np
+    with wave.open(str(path), "rb") as w:
+        frames = w.readframes(w.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def transcribe(src: str, model_size: str | None = None, duration: float = 0.0,
                on_progress: Callable[[float, str], None] | None = None,
                cancel: Callable[[], bool] | None = None,
@@ -80,7 +89,8 @@ def transcribe(src: str, model_size: str | None = None, duration: float = 0.0,
         if on_progress:
             on_progress(-1.0, "Extracting audio…")
         ft.run(args, cancel=cancel)
-        segments, info = model.transcribe(str(wav), vad_filter=True, beam_size=1)
+        audio = _read_wav(wav)   # pass samples directly - avoids faster-whisper's PyAV decoder,
+        segments, info = model.transcribe(audio, vad_filter=True, beam_size=1)   # which breaks on new PyAV
         total = (end - start) if end else (duration or getattr(info, "duration", 0) or 1.0)
         out: list[Segment] = []
         for seg in segments:
