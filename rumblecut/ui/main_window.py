@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__, analysis, config, context_images, downloader, editor
 from .. import ffmpeg_tools as ft
-from .. import ai, transcribe, updater
+from .. import ai, diction, transcribe, updater
 from .timeline import Timeline, fmt_time
 from .workers import Worker
 
@@ -218,8 +218,9 @@ class MainWindow(QMainWindow):
                                             "leave the end blank for 'to the end')")
         self.ranges_edit.setEnabled(False)
         self.ranges_edit.returnPressed.connect(self.start_download)
-        self.ranges_info = QLabel("Each range is saved as its own file. Tip: press “Check link” first "
-                                  "to see the video's length.")
+        self.ranges_info = QLabel("Works with Download (each range saved as its own video) and ⚡ Scan audio first "
+                                  "(the audio of each range is joined into one scan). Tip: press “Check link” "
+                                  "first to see the video's length.")
         self.ranges_info.setObjectName("muted")
         self.ranges_info.setWordWrap(True)
         self.part_only.toggled.connect(self.ranges_edit.setEnabled)
@@ -310,7 +311,7 @@ class MainWindow(QMainWindow):
                                     "This doesn't look like a rumble.com link. Try anyway?") != QMessageBox.Yes:
                 return
         ranges = None
-        if self.part_only.isChecked() and not audio_only:
+        if self.part_only.isChecked():
             try:
                 ranges = downloader.parse_ranges(self.ranges_edit.text(), self._link_duration or None)
             except ValueError as e:
@@ -340,8 +341,13 @@ class MainWindow(QMainWindow):
 
         def finished(res: downloader.DownloadResult):
             if audio_only:
-                entries = [{"path": res.path, "title": res.title, "uploader": res.uploader,
-                            "duration": res.duration, "url": res.url, "audio": True}]
+                ttl = res.title
+                if res.segments:
+                    ttl += "  [" + ", ".join(f"{downloader.fmt(sg[1])}–{downloader.fmt(sg[1] + sg[2])}"
+                                             for sg in res.segments) + "]"
+                entries = [{"path": res.path, "title": ttl, "uploader": res.uploader,
+                            "duration": res.duration, "url": res.url, "audio": True,
+                            "segments": res.segments, "length": sum(sg[2] for sg in res.segments) or 0}]
             elif res.sections:
                 entries = [{"path": s.path, "url": res.url, "uploader": res.uploader,
                             "title": f"{res.title}  [{downloader.fmt(s.start)} – "
@@ -367,7 +373,8 @@ class MainWindow(QMainWindow):
             else:
                 self.dl_status.setText(f"Saved to {entries[0]['path']}")
             e = entries[0]
-            self.load_video(e["path"], title=e["title"], url=res.url, offset=e.get("offset", 0.0))
+            self.load_video(e["path"], title=e["title"], url=res.url, offset=e.get("offset", 0.0),
+                            segments=e.get("segments") or [])
             if audio_only:
                 self.dl_status.setText(f"Audio saved ({Path(res.path).stat().st_size / 1e6:.0f} MB) - finding "
                                        "the best moments…")
@@ -419,19 +426,26 @@ class MainWindow(QMainWindow):
         self.min_gap = QSpinBox(); self.min_gap.setRange(0, 1800); self.min_gap.setSuffix(" s")
         self.min_gap.setValue(int(s["min_gap"]))
         self.use_scenes = QCheckBox("Scene changes"); self.use_scenes.setChecked(bool(s["scene_detection"]))
-        self.use_words = QCheckBox("Hype words (transcribe)")
-        self.use_words.setChecked(bool(s["transcript_boost"]) and transcribe.available())
-        self.use_words.setEnabled(transcribe.available())
-        self.use_words.setToolTip("Transcribes the stream and boosts moments where hype phrases are said."
-                                  if transcribe.available() else
-                                  "Install the optional 'faster-whisper' package to enable.")
-        self.min_gap.setToolTip("Minimum time between two moments, so you don't get near-duplicates")
-        for lbl, wdg in [("Show", self.n_clips), ("Min length", self.min_len), ("Max length", self.max_len),
-                         ("Gap", self.min_gap)]:
-            bar.addWidget(QLabel(lbl))
-            bar.addWidget(wdg)
+        self.judge_by = QComboBox()
+        self.judge_by.addItem("Voice & energy (fast)", "voice")
+        self.judge_by.addItem("Voice + what's said (recommended)", "candidates")
+        self.judge_by.addItem("Voice + full transcript (slowest)", "full")
+        self.judge_by.setToolTip(
+            "<b>How moments are judged</b><br>"
+            "<b>Voice &amp; energy:</b> pitch vs the speaker's normal (upbeat = higher), how animated the voice is, "
+            "talking pace, laughter, and loudness.<br>"
+            "<b>+ what's said:</b> the ~30 best-sounding stretches are transcribed on your PC and your AI model "
+            "(Settings → AI models) rates them: funny, hot take, shocking, heated, quotable…<br>"
+            "<b>+ full transcript:</b> the whole stream is read - slow on long streams, but also catches "
+            "calmly-delivered gems.<br>Without an AI model, a built-in word list is used instead.")
+        if not transcribe.available():
+            for i in (1, 2):
+                self.judge_by.model().item(i).setEnabled(False)
+        want = s.get("judge_by", "candidates") if transcribe.available() else "voice"
+        self.judge_by.setCurrentIndex(max(0, self.judge_by.findData(want)))
         bar.addWidget(self.use_scenes)
-        bar.addWidget(self.use_words)
+        bar.addWidget(QLabel("Judge by"))
+        bar.addWidget(self.judge_by)
         bar.addStretch()
         self.btn_analyse = QPushButton("Find highlights")
         self.btn_analyse.setObjectName("primary")
@@ -684,12 +698,13 @@ class MainWindow(QMainWindow):
     def _open_history_item(self, it: QListWidgetItem):
         h = it.data(Qt.UserRole + 1) or {}
         self.load_video(it.data(Qt.UserRole), title=h.get("title", ""), url=h.get("url", ""),
-                        offset=float(h.get("offset", 0.0)))
+                        offset=float(h.get("offset", 0.0)), segments=h.get("segments") or [])
 
     def _update_ranges_info(self):
         if not self.part_only.isChecked():
-            self.ranges_info.setText("Each range is saved as its own file. Tip: press “Check link” first "
-                                     "to see the video's length.")
+            self.ranges_info.setText("Works with Download (each range saved as its own video) and ⚡ Scan audio "
+                                     "first (the audio of each range is joined into one scan). Tip: press "
+                                     "“Check link” first to see the video's length.")
             return
         txt = self.ranges_edit.text().strip()
         if not txt:
@@ -710,22 +725,30 @@ class MainWindow(QMainWindow):
                 msg += f"  (skips {100 * (1 - total / dur):.0f}% of the video)"
         self.ranges_info.setText(msg)
 
-    def load_video(self, path: str, title: str = "", url: str = "", offset: float = 0.0):
+    def load_video(self, path: str, title: str = "", url: str = "", offset: float = 0.0,
+                   segments: list | None = None):
         try:
             self.info = ft.MediaInfo(path)
         except Exception as e:
             QMessageBox.warning(self, "Can't open video", str(e))
             return
         self.project = editor.Project(source=path, title=title or Path(path).stem, url=url,
-                                      offset=float(offset or 0.0), export=self.project.export)
+                                      offset=float(offset or 0.0), segments=list(segments or []),
+                                      export=self.project.export)
         self.project_path = None
         self.result = None
-        part = (f"   ·   part starting at {fmt_time(self.project.offset)} in the stream"
-                if self.project.offset else "")
+        if self.project.segments:
+            part = "   ·   parts " + ", ".join(f"{fmt_time(sg[1])}–{fmt_time(sg[1] + sg[2])}"
+                                              for sg in self.project.segments)
+        else:
+            part = (f"   ·   part starting at {fmt_time(self.project.offset)} in the stream"
+                    if self.project.offset else "")
         if not self.info.has_video:
             part += "   ·   🔊 audio only"
         dims = f"   ·   {self.info.width}×{self.info.height}" if self.info.has_video else ""
         self.src_label.setText(f"{self.project.title}   ·   {fmt_time(self.info.duration)}{dims}{part}")
+        self.timeline.time_fn = self.project.to_stream
+        self.timeline.joins = [sg[0] for sg in self.project.segments[1:]]
         self.timeline.set_data(self.info.duration)
         self.timeline.set_clips([])
         self.candidates = []
@@ -751,32 +774,31 @@ class MainWindow(QMainWindow):
         config.save_settings({"batch_size": self.n_clips.value(), "clip_min": self.min_len.value(),
                               "clip_max": self.max_len.value(),
                               "min_gap": self.min_gap.value(), "scene_detection": self.use_scenes.isChecked(),
-                              "transcript_boost": self.use_words.isChecked()})
+                              "judge_by": self.judge_by.currentData()})
         src = self.project.source
         n, gap = 100, self.min_gap.value()   # rank all, show in batches
         lo, hi = self.min_len.value(), self.max_len.value()
         scenes = self.use_scenes.isChecked() and bool(self.info and self.info.has_video)
-        words = self.use_words.isChecked()
-        dur = self.info.duration if self.info else 0
-        model = config.load_settings().get("whisper_model", "small")
+        words = self.judge_by.currentData() if transcribe.available() else "voice"
+        use_ai = ai.is_configured()
+        self._judged_with = ("voice & energy" if words == "voice" else
+                             f"voice + what's said ({ai.describe() if use_ai else 'built-in word list'})")
+
+        def transcriber(path, a, b, cancel=None, on_progress=None):
+            return transcribe.transcribe(path, start=a, end=b, cancel=cancel, on_progress=on_progress)
 
         def job(on_progress=None, cancel=None):
-            transcript = None
-            if words:
-                transcript = transcribe.transcribe(
-                    src, model, dur, cancel=cancel,
-                    on_progress=lambda f, m: on_progress(max(f, 0) * 0.5, m))
-                prog = lambda f, m: on_progress(0.5 + f * 0.5, m)
-            else:
-                prog = on_progress
-            return analysis.find_highlights(src, n, (lo + hi) / 2, gap, scenes, transcript,
-                                            on_progress=prog, cancel=cancel, min_len=lo, max_len=hi)
+            return analysis.find_highlights(src, n, (lo + hi) / 2, gap, scenes, None,
+                                            on_progress=on_progress, cancel=cancel, min_len=lo, max_len=hi,
+                                            words=words, transcriber=transcriber,
+                                            ai_reader=diction.ai_spans if use_ai else None)
 
         w = Worker(job)
         self.btn_analyse.setEnabled(False)
         self.btn_an_cancel.setEnabled(True)
         self.btn_an_cancel.clicked.connect(w.cancel)
-        w.progress.connect(lambda f, m: (self.an_progress.setValue(int(f * 1000)), self.an_status.setText(m)))
+        w.progress.connect(lambda f, m: (self.an_progress.setRange(0, 1000), self.an_progress.setValue(int(f * 1000)),
+                                         self.an_status.setText(m)))
         w.done.connect(self._analysis_done)
         w.failed.connect(lambda m: QMessageBox.warning(self, "Analysis failed", m))
         w.cancelled.connect(lambda: self.an_status.setText("Cancelled"))
@@ -799,8 +821,13 @@ class MainWindow(QMainWindow):
         self.timeline.set_data(res.duration, res.times, res.score)
         self.show_more(first=True)
         n = len(res.highlights)
-        self.an_status.setText(f"Found {n} possible moment{'s' if n != 1 else ''} - showing the best "
-                               f"{min(n, self.n_clips.value())}")
+        note = getattr(res, "word_note", "")
+        msg = (f"Found {n} possible moment{'s' if n != 1 else ''} - showing the best {min(n, self.n_clips.value())}"
+               f"  ·  judged by {getattr(self, '_judged_with', 'voice & energy')}")
+        if note and note not in ("ai", "words"):
+            msg += f"  ·  ⚠ {note}"
+            self.statusBar().showMessage("⚠ " + note, 10000)
+        self.an_status.setText(msg)
 
     def show_more(self, first: bool = False):
         """Move the next batch of ranked moments into the clip list."""
@@ -812,7 +839,7 @@ class MainWindow(QMainWindow):
             self.project.clips.append(editor.Clip(
                 source=self.project.source, start=h.start, end=h.end, score=h.score, reasons=h.reasons,
                 why=list(h.why), timing=list(h.timing),
-                title=f"{h.kind} at {fmt_time(h.peak + self.project.offset)}"))
+                title=f"{h.kind} at {fmt_time(self.project.to_stream(h.peak))}"))
         self._fill_clip_list()
         if take:
             self.clip_list.setCurrentRow(start_row)
@@ -967,14 +994,14 @@ class MainWindow(QMainWindow):
 
     def _item_text(self, i: int, c) -> str:
         reason = c.reasons[0] if c.reasons else "Manual clip"
-        a, b = c.start + c.offset + self.project.offset, c.end + c.offset + self.project.offset
+        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream(c.end + c.offset)
         tag = "   🔊 audio only" if not self._has_video(c.source) else ("   🎬 video fetched" if c.offset else "")
         return (f"{i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
                 f"score {c.score:.0f}{tag}\n{reason}")
 
     def _why_html(self, c) -> str:
         """Hover text: why this moment was picked and why it starts/ends where it does."""
-        a, b = c.start + c.offset + self.project.offset, c.end + c.offset + self.project.offset
+        a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream(c.end + c.offset)
         why = c.why or c.reasons or ["Added by hand."]
         timing = c.timing or ["You set the start and end yourself."]
         li = lambda xs: "".join(f"<li>{x}</li>" for x in xs)
@@ -1113,7 +1140,7 @@ class MainWindow(QMainWindow):
     def seek_to(self, t: float):
         """Seek on the project timeline (the stream, or its audio)."""
         self.timeline.set_playhead(t)
-        self.pos_label.setText(fmt_time(t + self.project.offset))
+        self.pos_label.setText(fmt_time(self.project.to_stream(t)))
         if self.player and self.project.source:
             self._load_media(self.project.source, 0.0)
             self.player.setPosition(int(t * 1000))
@@ -1121,7 +1148,7 @@ class MainWindow(QMainWindow):
     def seek_clip(self, c, t: float):
         """Seek to time `t` inside clip c's own file (its downloaded video, or the stream)."""
         self.timeline.set_playhead(t + c.offset)
-        self.pos_label.setText(fmt_time(t + c.offset + self.project.offset))
+        self.pos_label.setText(fmt_time(self.project.to_stream(t + c.offset)))
         if self.player:
             self._load_media(c.source, c.offset)
             self.player.setPosition(int(t * 1000))
@@ -1156,7 +1183,7 @@ class MainWindow(QMainWindow):
         t = ms / 1000
         if self._media_offset is not None:          # None while an effects preview is playing
             self.timeline.set_playhead(t + self._media_offset)
-            self.pos_label.setText(fmt_time(t + self._media_offset + self.project.offset))
+            self.pos_label.setText(fmt_time(self.project.to_stream(t + self._media_offset)))
         else:
             self.pos_label.setText(fmt_time(t))
         if self._clip_stop_at is not None and t >= self._clip_stop_at:
@@ -1193,9 +1220,9 @@ class MainWindow(QMainWindow):
             url = url.strip()
             self.project.url = url
         pad = 3.0
-        dur = (self.info.duration if self.info else 0) + self.project.offset
-        spans = sorted((max(0.0, c.start + c.offset + self.project.offset - pad),
-                        c.end + c.offset + self.project.offset + pad) for c in targets)
+        dur = 0 if self.project.segments else (self.info.duration if self.info else 0) + self.project.offset
+        spans = sorted((max(0.0, self.project.to_stream(c.start + c.offset) - pad),
+                        self.project.to_stream(c.end + c.offset) + pad) for c in targets)
         ranges: list[tuple[float, float | None]] = []
         for a, b in spans:                       # merge overlapping moments into one download
             if dur:
@@ -1224,15 +1251,16 @@ class MainWindow(QMainWindow):
         def done(res: downloader.DownloadResult):
             got = 0
             for c in targets:
-                a = c.start + c.offset + self.project.offset
-                b = c.end + c.offset + self.project.offset
+                pt_start = c.start + c.offset                       # position on the project timeline
+                a = self.project.to_stream(pt_start)
+                b = self.project.to_stream(c.end + c.offset)
                 sec = next((x for x in res.sections if x.start <= a + 0.01 and (x.end is None or x.end >= b - 0.6)),
                            None)
                 if not sec:
                     continue
                 c.source = sec.path
                 c.start, c.end = round(a - sec.start, 2), round(b - sec.start, 2)
-                c.offset = sec.start - self.project.offset
+                c.offset = pt_start - c.start                      # keeps it at the same place on the timeline
                 got += 1
             mb = sum(Path(x.path).stat().st_size for x in res.sections if Path(x.path).exists()) / 1e6
             self._fill_clip_list(keep_row=True)
@@ -1510,7 +1538,7 @@ class MainWindow(QMainWindow):
         if not os.path.exists(proj.source):
             QMessageBox.warning(self, "Video missing", f"The project's video wasn't found:\n{proj.source}")
             return
-        self.load_video(proj.source, proj.title, proj.url, proj.offset)
+        self.load_video(proj.source, proj.title, proj.url, proj.offset, proj.segments)
         self.project = proj
         self.project_path = path
         self._apply_export_settings()

@@ -44,9 +44,24 @@ Options:
 **⚡ Scan audio first (fastest for long streams):** paste the link and press **⚡ Scan audio first** instead of Download.
 1. Only the sound is downloaded, as an MP3. If Rumble has no separate audio track, the smallest video version is fetched and only its sound is kept.
 2. The best moments appear in the Clip studio. Press **▶ Play clip** to listen to each one, and tick the ones you like.
-3. Press **⬇ Get video for ticked moments**. Only those parts of the video are downloaded, with 3 seconds of padding either side. They become normal clips you can edit and export.
+3. Press **⬇ Get video for ticked moments**.
+
+   Tick **Only download part of the video** first, and the audio scan only fetches those parts too. They're joined into one scan, and every time shown is still the real stream time. Only those parts of the video are downloaded, with 3 seconds of padding either side. They become normal clips you can edit and export.
 
 **② Clip studio**
+- **How moments are judged** (the **Judge by** box):
+  - **Voice & energy** (fast):
+    - **pitch** compared with the speaker's own normal (upbeat and excited voices go up)
+    - **how animated** the voice is (pitch swings)
+    - **talking pace**
+    - **laughter**
+    - **loudness**, as a minor signal, so a loud ad read no longer counts as a highlight
+  - **Voice + what's said** (recommended):
+    1. The ~30 best-sounding stretches are transcribed on your PC.
+    2. Your AI model (Settings → AI models: Ollama, LM Studio or Claude) reads them and rates each one: funny, hot take, shocking, heated, emotional, quotable, story payoff. Each comes with a reason.
+    3. Without an AI model, a built-in word list (laughter, "no way", strong words…) is used.
+    4. If speech-to-text can't run, the scan falls back to voice only and tells you.
+  - **Voice + full transcript** (slowest): reads the whole stream, so it also catches gems delivered calmly.
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
 - **How each clip's time range is chosen:**
@@ -133,7 +148,9 @@ The signals are combined into a score. The top peaks are picked with a minimum g
 app.py                      entry point → RumbleCut.exe
 rumblecut/
   downloader.py             yt-dlp wrapper: Rumble videos and stream replays, progress, resume, friendly errors
-  analysis.py               highlight detection (streams audio in chunks, so 4 h+ files use little memory)
+  analysis.py               moment finding: combines voice, words and energy; picks and times the clips
+  voice.py                  how it's said: pitch, pitch swings, pace, laughter (streams audio, 4 h ≈ 1 min)
+  diction.py                what's said: AI reads the transcript and rates passages; offline word list
   transcribe.py             optional faster-whisper speech-to-text (GPU when available)
   editor.py                 Clip / Project model, effects, aspect ratios, overlays, transitions, batch export
   context_images.py         interfaces for the upcoming Context Images feature

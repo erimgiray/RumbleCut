@@ -15,7 +15,8 @@ DEFAULTS = {
     "num_clips": 10,
     "min_gap": 45,
     "scene_detection": True,
-    "transcript_boost": False,   # needs optional faster-whisper
+    "transcript_boost": False,   # (old setting, replaced by "judge_by")
+    "judge_by": "candidates",    # "voice" | "candidates" | "full"
     "whisper_model": "small",
     "export_quality": "high",
     "auto_update_check": True,

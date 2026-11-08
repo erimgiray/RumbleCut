@@ -27,6 +27,22 @@ def diagnose(out_path: str, with_asr: bool) -> int:
     check("qt_multimedia", lambda: __import__("PySide6.QtMultimedia", fromlist=["x"]) and "ok")
     check("ai_module", lambda: __import__("rumblecut.ai", fromlist=["x"]).describe())
     check("faster_whisper", lambda: __import__("faster_whisper").__version__)
+
+    def voice_check():
+        import tempfile, os
+        from rumblecut import ffmpeg_tools as ft, voice
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "voice.mp3")
+        ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "sine=f=180:d=6", "-c:a", "libmp3lame", p])
+        vf = voice.analyse(p, 6)
+        import numpy as np
+        f0 = float(np.nanmedian(vf.pitch))
+        assert 160 < f0 < 200, f"pitch tracker read {f0:.0f} Hz for a 180 Hz tone"
+        return f"pitch tracker ok ({f0:.0f} Hz on a 180 Hz tone)"
+    check("voice_analysis", voice_check)
+    check("diction", lambda: len(__import__("rumblecut.diction", fromlist=["x"]).lexicon_spans(
+        [(0.0, 3.0, "No way, that is insane! Ha ha ha")])) == 1 and "word list ok")
     if with_asr:
         def asr():
             import tempfile, os

@@ -122,6 +122,12 @@ def settings() -> dict:
     }
 
 
+def is_configured() -> bool:
+    """True when an AI model is chosen (local model picked, or a cloud key saved)."""
+    c = settings()
+    return bool(get_api_key()) if c["mode"] == "cloud" else bool(c["local_model"])
+
+
 def describe() -> str:
     c = settings()
     if c["mode"] == "cloud":

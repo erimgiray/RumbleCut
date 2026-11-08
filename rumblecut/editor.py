@@ -134,8 +134,20 @@ class Project:
     title: str = ""
     url: str = ""
     offset: float = 0.0        # where this file starts in the original stream (partial downloads)
+    # For an audio scan of several parts joined together: [file_start, stream_start, length] per part
+    segments: list = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
     export: ExportSettings = field(default_factory=ExportSettings)
+
+    def to_stream(self, t: float) -> float:
+        """Position in this project's file -> position in the original stream."""
+        if self.segments:
+            seg = self.segments[0]
+            for sg in self.segments:
+                if t >= sg[0] - 1e-6:
+                    seg = sg
+            return seg[1] + (t - seg[0])
+        return t + self.offset
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -149,7 +161,8 @@ class Project:
             clips.append(Clip(**c, overlays=ovs))
         exp = ExportSettings(**d.get("export", {}))
         return Project(source=d.get("source", ""), title=d.get("title", ""), url=d.get("url", ""),
-                       offset=float(d.get("offset", 0.0)), clips=clips, export=exp)
+                       offset=float(d.get("offset", 0.0)), segments=d.get("segments", []) or [],
+                       clips=clips, export=exp)
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -455,8 +468,8 @@ def export_project(project: Project, out_dir: str | Path,
                                      str(out_dir / f"{name}.jpg"), width=1280)
                 except Exception:
                     pass
-            rows.append([i, c.title, _ts(c.start + c.offset + project.offset),
-                         _ts(c.end + c.offset + project.offset),
+            rows.append([i, c.title, _ts(project.to_stream(c.start + c.offset)),
+                         _ts(project.to_stream(c.end + c.offset)),
                          f"{c.out_length:.1f}", c.score,
                          "; ".join(c.reasons), out.name])
             done += 1

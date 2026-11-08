@@ -42,6 +42,7 @@ class DownloadResult:
     duration: float
     url: str
     sections: list[Section] = field(default_factory=list)   # filled for partial downloads
+    segments: list = field(default_factory=list)            # audio scans of parts: [file_start, stream_start, length]
 
 
 def is_rumble_url(url: str) -> bool:
@@ -199,7 +200,9 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
                 on_progress(-1.0, f"Part {state['section']} of {n_sections} saved  •  "
                                   f"downloading part {state['section'] + 1}…")
 
-    if audio_only:
+    if audio_only and ranges:
+        tmpl = "%(title).70B [%(id)s] audio %(section_start)d-%(section_end)ds.%(ext)s"
+    elif audio_only:
         tmpl = "%(title).85B [%(id)s] audio.%(ext)s"
     elif ranges:
         tmpl = "%(title).80B [%(id)s] %(section_start)d-%(section_end)ds.%(ext)s"
@@ -279,11 +282,43 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
         if not sections:
             raise RuntimeError("The selected parts couldn't be saved. Check the times and try again.")
 
+    if audio_only and sections:
+        joined, segments = _join_audio_parts(sections, out_dir, info)
+        return DownloadResult(path=joined, title=info.get("title") or Path(joined).stem,
+                              uploader=info.get("uploader") or "", duration=duration, url=url,
+                              segments=segments)
+
     return DownloadResult(
         path=sections[0].path if sections else files[0],
         title=info.get("title") or Path(files[0]).stem, uploader=info.get("uploader") or "",
         duration=duration, url=url, sections=sections,
     )
+
+
+def _join_audio_parts(sections: list[Section], out_dir: Path, info: dict):
+    """Join the downloaded audio parts into one scan file; remember where each part sits."""
+    parts = sorted(sections, key=lambda x: x.start)
+    segments, pos = [], 0.0
+    for sec in parts:
+        length = ffmpeg_tools.MediaInfo(sec.path).duration
+        segments.append([round(pos, 3), float(sec.start), round(length, 3)])
+        pos += length
+    name = "%s [%s] audio %s.mp3" % (
+        ffmpeg_tools.safe_filename(info.get("title") or "stream", 70), info.get("id") or "x",
+        "+".join(f"{fmt(s.start).replace(':', '.')}" for s in parts))
+    joined = out_dir / name
+    if len(parts) == 1:
+        Path(parts[0].path).replace(joined)
+    else:
+        lst = out_dir / ".rumblecut_join.txt"
+        lst.write_text("".join("file '%s'\n" % str(Path(p.path).resolve()).replace("'", "'\\''")
+                               for p in parts), encoding="utf-8")
+        ffmpeg_tools.run([ffmpeg_tools.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
+                          "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
+        lst.unlink(missing_ok=True)
+        for p in parts:
+            Path(p.path).unlink(missing_ok=True)
+    return str(joined), segments
 
 
 def _friendly_error(msg: str) -> str:

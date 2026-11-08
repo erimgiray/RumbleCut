@@ -180,10 +180,22 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     on_progress: ProgressFn | None = None,
                     cancel: Callable[[], bool] | None = None,
                     min_len: float | None = None, max_len: float | None = None,
-                    lead_in: float = 4.0) -> AnalysisResult:
-    """Clips follow each moment: they start when the energy begins to build (plus `lead_in`
-    seconds of context), end once it has settled, snap to pauses, and stay within
-    min_len..max_len. Without min/max, both default to around `clip_length`."""
+                    lead_in: float = 4.0, words: str = "off",
+                    transcriber: Callable | None = None,
+                    ai_reader: Callable | None = None) -> AnalysisResult:
+    """Find the most interesting moments.
+
+    How it's said (always): voice pitch vs the speaker's normal, how animated the voice is,
+    talking pace, laughter - plus loudness as a minor signal.
+    What's said (words="candidates" or "full"): the speech is transcribed by `transcriber`
+    and rated by `ai_reader` (your AI model) or, without one, an offline word list.
+      candidates - only the ~30 best-sounding stretches are transcribed and read (fast)
+      full       - the whole stream is transcribed and read (slow, catches calm-but-funny lines)
+
+    Clips follow each moment: they start when it begins to build (plus `lead_in` seconds),
+    end once it has settled, snap to pauses, and stay within min_len..max_len."""
+    from . import diction, voice
+
     min_len = float(min_len if min_len is not None else max(5.0, clip_length * 0.6))
     max_len = float(max_len if max_len is not None else max(min_len, clip_length * 1.5))
     if max_len < min_len:
@@ -193,42 +205,63 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     if dur <= 0:
         raise ValueError("Couldn't read the video's length.")
 
-    # Stage weights for an overall progress bar
     def stage(lo, hi):
         if not on_progress:
             return None
-        return lambda f, msg: on_progress(lo + (hi - lo) * f, msg)
+        return lambda f, msg: on_progress(lo + (hi - lo) * max(0.0, f), msg)
 
     scenes_on = use_scenes and info.has_video
-    audio_hi = 0.55 if scenes_on else 0.95
+    words_on = words in ("candidates", "full") and transcriber is not None
+    a_hi = 0.25 if words_on else (0.6 if scenes_on else 0.95)
 
+    # ---- 1. how it's said
     if info.has_audio:
-        loud = audio_loudness(src, dur, stage(0.0, audio_hi), cancel)
+        vf = voice.analyse(src, dur, stage(0.0, a_hi), cancel)
     else:
-        loud = np.full(int(dur / HOP) + 1, -60.0, dtype=np.float32)
+        z = np.zeros(int(dur / HOP) + 1, np.float32)
+        vf = voice.VoiceFeatures(z - 60, np.full_like(z, np.nan), z, z, z, z)
+    loud = vf.loud_db
     n = max(len(loud), 1)
     times = np.arange(n, dtype=np.float32) * HOP
 
     scene_t: list[float] = []
     if scenes_on:
-        scene_t = scene_changes(src, dur, on_progress=stage(audio_hi, 0.95), cancel=cancel)
-
-    if on_progress:
-        on_progress(0.96, "Scoring moments…")
+        scene_t = scene_changes(src, dur, on_progress=stage(a_hi, a_hi + 0.1 if words_on else 0.95),
+                                cancel=cancel)
 
     loud = np.maximum(loud, -70.0)
-    voiced = loud > -55
-    # Excitement: loudness above local baseline, scaled by robust spread
+    talking = _smooth(vf.voiced, 2.0) > 0.15
+    # loudness - kept as a minor signal
     baseline = _rolling_median(loud, 120.0)
     dev = loud - baseline
-    mad = float(np.median(np.abs(dev[voiced] - np.median(dev[voiced])))) if voiced.any() else 1.0
+    voiced_l = loud > -55
+    mad = float(np.median(np.abs(dev[voiced_l] - np.median(dev[voiced_l])))) if voiced_l.any() else 1.0
     excite = np.clip(dev / (1.4826 * max(mad, 0.5)), -2, 8)
     excite_s = _smooth(excite, 4.0)
     sustain = _smooth(np.clip(excite, 0, None), 12.0)
-    # Rise: sudden jump in short-term loudness
     short = _smooth(loud, 1.0)
     rise = np.clip(short - np.roll(_smooth(loud, 6.0), int(4 / HOP)), 0, None)
     rise[: int(6 / HOP)] = 0
+    # pitch vs the speaker's normal (semitones); upbeat / excited speech goes up
+    with np.errstate(invalid="ignore", divide="ignore"):
+        base_pitch = voice.nan_rolling_median(vf.pitch, 300.0)
+        semis = 12 * np.log2(vf.pitch / np.maximum(base_pitch, 40))
+    semis = np.where(np.isfinite(semis), semis, 0.0)
+    pitch_up = _smooth(np.clip(semis, 0, 12), 3.0)
+    # averages over *talking time only*, so pauses between sentences don't distort them
+    vw = np.clip(vf.voiced, 0, 1)
+    vden = _smooth(vw, 4.0) + 1e-3
+    steady = vden > 0.25                                    # at least ~1 s of speech in the 4 s window
+    # animated: pitch swings vs normal
+    spread_avg = _smooth(vf.spread * vw, 4.0) / vden
+    spread_base = voice.nan_rolling_median(np.where(steady, spread_avg, np.nan), 300.0)
+    animated = np.clip(spread_avg / np.maximum(spread_base, 0.3) - 1, 0, 3) * steady
+    # pace: syllable-like bursts per second of speech vs normal
+    pace_now = _smooth(vf.onsets, 4.0) / vden
+    pace_base = voice.nan_rolling_median(np.where(steady, pace_now, np.nan), 300.0)
+    pace = np.clip(pace_now / np.maximum(pace_base, 0.3) - 1, 0, 2) * steady
+    # laughter-ish: regular rapid bursts with raised pitch
+    laugh = _smooth(np.where((vf.laughish > 0.45) & (semis > 2) & (vf.voiced > 0.3), vf.laughish, 0.0), 2.0)
 
     scene_density = np.zeros(n, dtype=np.float32)
     if scene_t:
@@ -236,17 +269,93 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         np.add.at(scene_density, idx, 1.0)
         scene_density = _smooth(scene_density, 10.0)
 
-    kw = np.zeros(n, dtype=np.float32)
-    kw_label: dict[int, str] = {}
-    if transcript:
-        kw, kw_label = keyword_hits(transcript, n, keywords or DEFAULT_KEYWORDS)
-        kw = _smooth(kw, 6.0)
+    voice_score = (1.0 * _norm01(pitch_up) + 0.45 * _norm01(animated) + 0.35 * _norm01(pace)
+                   + 0.4 * _norm01(laugh))
+    energy_score = 0.4 * _norm01(excite_s) + 0.2 * _norm01(sustain) + 0.25 * _norm01(rise)
+    base = voice_score + energy_score + (0.3 * _norm01(scene_density) if scene_t else 0)
+    base = _smooth(base, 2.0)
 
-    score = (1.0 * _norm01(excite_s) + 0.45 * _norm01(sustain) + 0.45 * _norm01(rise)
-             + (0.35 * _norm01(scene_density) if scene_t else 0)
-             + (0.8 * _norm01(kw) if transcript else 0))
-    score = _smooth(score, 2.0)
-    score = _norm01(score)
+    # ---- 2. what's said
+    spans: list = []
+    word_note = ""
+    transcript = list(transcript or [])
+    if words_on:
+        if words == "full":
+            windows = [(a, min(dur, a + 150.0)) for a in np.arange(0, dur, 150.0)]
+        else:
+            # transcribe only the best-sounding stretches
+            order = np.argsort(-base)
+            taken = np.zeros(n, bool)
+            peaks = []
+            for i in order:
+                if len(peaks) >= 30:
+                    break
+                if not taken[i]:
+                    peaks.append(i)
+                    taken[max(0, i - int(60 / HOP)): i + int(60 / HOP)] = True
+            windows = []
+            for i in sorted(peaks):
+                a, b = max(0.0, i * HOP - 50), min(dur, i * HOP + 40)
+                if windows and a <= windows[-1][1]:
+                    windows[-1] = (windows[-1][0], b)
+                else:
+                    windows.append((a, b))
+        t_lo, t_hi = a_hi + (0.1 if scenes_on else 0), 0.75
+        blocks = []
+        total_secs = sum(b - a for a, b in windows) or 1
+        done_secs = 0.0
+        asr_error = None
+        for a, b in windows:
+            if cancel and cancel():
+                raise Cancelled()
+            try:
+                segs = transcriber(src, a, b, cancel=cancel,
+                               on_progress=(lambda f, m, d=done_secs, ln=b - a: on_progress(
+                                   t_lo + (t_hi - t_lo) * (d + max(0, f) * ln) / total_secs,
+                                   f"Transcribing what's said… ({_fmt(a)} – {_fmt(b)})")) if on_progress else None)
+            except Cancelled:
+                raise
+            except Exception as e:          # e.g. speech model can't download while offline
+                asr_error = str(e)
+                break
+            done_secs += b - a
+            transcript.extend(segs)
+            blocks.append((a, b, segs))
+        if asr_error:
+            word_note = f"Couldn't transcribe the speech ({asr_error[:120]}) - judged by voice & energy only"
+            blocks, transcript = [], []
+        if ai_reader is not None and blocks:
+            try:
+                spans = ai_reader(blocks, on_progress=stage(0.75, 0.96), cancel=cancel)
+                word_note = "ai"
+            except Cancelled:
+                raise
+            except Exception as e:
+                word_note = f"AI unavailable ({e}) - used the built-in word list instead"
+                spans = []
+        if not spans and ai_reader is None and not asr_error:
+            word_note = "words"
+    if transcript:
+        spans = list(spans) + diction.lexicon_spans(transcript)
+
+    words_curve = np.zeros(n, np.float32)
+    span_at: dict[int, object] = {}
+    for sp in spans:
+        a, b = int(sp.start / HOP), min(n, int(sp.end / HOP) + 1)
+        w = sp.score * (1.0 if sp.source == "ai" else 0.55)
+        for j in range(a, b):
+            if w > words_curve[j]:
+                words_curve[j] = w
+                span_at[j] = sp
+    has_words = bool(spans)
+    score = base + (1.4 * words_curve if has_words else 0)
+    score = _norm01(_smooth(score, 2.0))
+    if on_progress:
+        on_progress(0.97, "Scoring moments…")
+
+    # keep values for the explanations below
+    kw_label: dict[int, str] = {}
+    kw = words_curve
 
     # Peak picking with non-maximum suppression
     L = max(5.0, (min_len + max_len) / 2)
@@ -331,40 +440,71 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             start, end = max(0.0, start - (end - dur)), dur
         end = max(end, min(dur, peak + 1.5))
 
-        # what was heard / seen, in plain English
+        # what was heard / said / seen, in plain English
         reasons: list[str] = []
         why: list[str] = []
         kind = "Moment"
-        if excite[i] > 1.5 or dev[i] > 4:
-            reasons.append(f"Volume spike (+{max(dev[i], 0):.0f} dB over normal)")
-            why.append(f"Loud: {max(dev[i], 0):.0f} dB louder than the typical level of the 2 minutes around it.")
-            kind = "Loud moment"
-        if rise[i] > 6:
-            reasons.append("Sudden reaction")
-            why.append(f"Sudden reaction: the volume jumped by about {rise[i]:.0f} dB within a few seconds.")
-            kind = "Reaction"
-        if sustain[i] > 1.0:
-            reasons.append("Sustained high energy")
-            why.append("Stays heated: the energy remained well above normal for 10+ seconds, not just one shout.")
+        win = slice(max(0, i - int(4 / HOP)), min(n, i + int(4 / HOP)))
+        sp = next((span_at[j] for j in sorted(range(win.start, win.stop), key=lambda j: abs(j - i))
+                   if j in span_at), None)
+        if sp is not None:
+            if sp.source == "ai":
+                reasons.append(f"{sp.label}: {sp.why}"[:70])
+                why.append(f"What's said - {sp.label.lower()} ({sp.score * 10:.0f}/10 from your AI): {sp.why}"
+                           + (f" “{sp.quote}”" if sp.quote else ""))
+                kind = sp.label
+            else:
+                reasons.append(sp.label)
+                why.append(f"What's said - {sp.why}" + (f" “{sp.quote[:80]}”" if sp.quote else ""))
+                kind = "Laughter" if sp.label == "Laughter" else kind
+        pu = float(np.max(pitch_up[win]))
+        if pu >= 2.0:
+            reasons.append(f"Voice up {pu:.0f} semitones")
+            why.append(f"Upbeat voice: pitch about {pu:.0f} semitones above their normal - sounds excited.")
             if kind == "Moment":
-                kind = "Heated stretch"
+                kind = "Excited"
+        if float(np.max(animated[win])) > 0.8:
+            reasons.append("Animated delivery")
+            why.append(f"Animated: the voice swings in pitch {1 + float(np.max(animated[win])):.1f}× more than usual.")
+            if kind == "Moment":
+                kind = "Animated"
+        if float(np.max(pace[win])) > 0.4:
+            why.append(f"Talking fast: about {100 * float(np.max(pace[win])):.0f}% quicker than their normal pace.")
+            reasons.append("Fast talking")
+        if float(np.max(laugh[win])) > 0.3:
+            reasons.append("Laughter")
+            why.append("Sounds like laughter: rapid, regular 'ha-ha' bursts with a raised voice.")
+            if kind in ("Moment", "Excited", "Animated"):
+                kind = "Laughter"
+        if excite[i] > 1.5 or dev[i] > 4:
+            reasons.append(f"Louder (+{max(dev[i], 0):.0f} dB)")
+            why.append(f"Louder: {max(dev[i], 0):.0f} dB above the typical level of the 2 minutes around it.")
+            if kind == "Moment":
+                kind = "Loud moment"
+        if rise[i] > 6:
+            why.append(f"Sudden reaction: the volume jumped by about {rise[i]:.0f} dB within a few seconds.")
+            if kind in ("Moment", "Loud moment"):
+                kind = "Reaction"
         if scene_t and scene_density[i] > np.percentile(scene_density, 90):
             cuts = int(np.sum(np.abs(np.asarray(scene_t) - peak) < 6))
             reasons.append("Lots of on-screen action")
             why.append(f"Busy on screen: {cuts} visual cuts or big changes within 6 s of the peak.")
             if kind == "Moment":
                 kind = "Action"
-        if i in kw_label or (transcript and kw[i] > 0):
-            lab = kw_label.get(i) or next((kw_label[j] for j in range(i - 12, i + 12) if j in kw_label), None)
-            if lab:
-                reasons.append(f'Said "{lab}"')
-                why.append(f'Hype words: “{lab}” was said here.')
-                kind = f'“{lab.capitalize()}”'
         if not reasons:
             reasons.append("Above-average energy")
-            why.append("No single big spike, but the overall energy here is higher than most of the stream.")
+            why.append("No single standout signal, but voice and energy here are livelier than most of the stream.")
         top = max(1, int(round(100.0 * float(np.mean(score > score[i])))) or 1)
-        why.append(f"Excitement score {score[i] * 100:.0f}/100: in the top {top}% of the whole stream.")
+        why.append(f"Overall score {score[i] * 100:.0f}/100: in the top {top}% of the whole stream.")
+        # skip near-duplicates: mostly the same stretch as a better moment already found
+        dup = False
+        for h in highlights:
+            ov = min(end, h.end) - max(start, h.start)
+            if ov > 0.5 * min(end - start, h.end - h.start):
+                dup = True
+                break
+        if dup:
+            continue
         highlights.append(Highlight(start=round(start, 2), end=round(end, 2), peak=round(peak, 2),
                                     score=round(float(score[i]) * 100, 1), reasons=reasons,
                                     why=why, timing=timing, kind=kind))
@@ -372,5 +512,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     highlights.sort(key=lambda h: -h.score)
     if on_progress:
         on_progress(1.0, f"Found {len(highlights)} highlights")
-    return AnalysisResult(duration=dur, times=times, score=score, loudness=loud,
-                          scene_times=scene_t, highlights=highlights, transcript=transcript or [])
+    res = AnalysisResult(duration=dur, times=times, score=score, loudness=loud,
+                         scene_times=scene_t, highlights=highlights, transcript=transcript or [])
+    res.word_note = word_note
+    return res

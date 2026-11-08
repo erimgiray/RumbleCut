@@ -28,6 +28,8 @@ class Timeline(QWidget):
         self.clips: list[tuple[float, float]] = []
         self.selected = -1
         self.tips: list[str] = []
+        self.time_fn = lambda t: t          # file time -> stream time for labels
+        self.joins: list[float] = []        # where separately downloaded parts were joined
         self.playhead = 0.0
 
     def set_data(self, duration, times=None, score=None):
@@ -71,7 +73,12 @@ class Timeline(QWidget):
             p.setPen(QColor("#7c8591"))
             lx = min(max(x - 30, 0), self.width() - 60)
             align = Qt.AlignLeft if i == 0 else (Qt.AlignRight if i == steps else Qt.AlignCenter)
-            p.drawText(QRectF(lx, bottom + 2, 60, 14), align, fmt_time(self.duration * i / steps))
+            p.drawText(QRectF(lx, bottom + 2, 60, 14), align, fmt_time(self.time_fn(self.duration * i / steps)))
+        # joins between separately downloaded parts
+        for jt in self.joins:
+            x = self._x(jt)
+            p.setPen(QPen(QColor("#f59e0b"), 1, Qt.DashLine))
+            p.drawLine(QPointF(x, top), QPointF(x, bottom))
         # highlight regions
         for i, (s, e) in enumerate(self.clips):
             x0, x1 = self._x(s), self._x(e)
@@ -117,7 +124,7 @@ class Timeline(QWidget):
     def mouseMoveEvent(self, ev):
         if self.duration:
             t = self._t(ev.position().x())
-            tip = fmt_time(t)
+            tip = fmt_time(self.time_fn(t))
             for i, (s, e) in enumerate(self.clips):
                 if s <= t <= e and i < len(getattr(self, "tips", [])):
                     tip = f"<b>#{i + 1}</b> · {self.tips[i]}"
