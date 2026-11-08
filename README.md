@@ -79,12 +79,10 @@ Projects can be saved and reopened later (`.rcproj`).
 
 ### Publishing an app update
 1. Change `__version__` in `rumblecut/__init__.py`, e.g. to `1.2.0`.
-2. Commit and push to GitHub, then tag the release:
-   ```
-   git tag v1.2.0
-   git push origin v1.2.0
-   ```
-3. The workflow builds `RumbleCut.exe` and publishes it as a Release. Every copy of the app then sees the update under Settings → Check for updates.
+2. Commit and push to `main` on GitHub.
+3. The workflow builds `RumbleCut.exe`. Because v1.2.0 doesn't exist yet, it publishes it as a Release. Every copy of the app then sees the update under Settings → Check for updates.
+
+Pushes that don't change the version just build a test `.exe`, which you can download from the run's Artifacts.
 
 The repository the app checks can be changed in Settings. It's `erimgiray/RumbleCut` by default.
 

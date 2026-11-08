@@ -1,7 +1,7 @@
-# Builds RumbleCut.exe on GitHub's Windows machines.
-#  - Every push to main: builds and attaches the .exe to the run (Actions tab -> run -> Artifacts).
-#  - Pushing a version tag (e.g. v1.2.0): also publishes a GitHub Release with RumbleCut.exe,
-#    which is what the app's Settings -> "Check for updates" downloads.
+# Builds RumbleCut.exe on GitHub's Windows machines on every push to main.
+# If __version__ in rumblecut/__init__.py has no release yet, it also publishes
+# GitHub Release v<version> with RumbleCut.exe - which is what the app's
+# Settings -> "Check for updates" downloads. So: bump the version, push, done.
 name: Build RumbleCut.exe
 on:
   push:
@@ -38,9 +38,21 @@ jobs:
         with:
           name: RumbleCut-windows
           path: dist/RumbleCut.exe
+      - name: Is this a new version?
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(python -c "import rumblecut; print(rumblecut.__version__)")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then echo "new=false" >> "$GITHUB_OUTPUT"; else echo "new=true" >> "$GITHUB_OUTPUT"; fi
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.new == 'true' && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: RumbleCut ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: dist/RumbleCut.exe
           generate_release_notes: true
