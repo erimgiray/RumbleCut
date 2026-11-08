@@ -1029,7 +1029,8 @@ class MainWindow(QMainWindow):
                                             words=words, transcriber=transcriber,
                                             ai_reader=diction.ai_spans if use_ai else None,
                                             guidance=guidance, on_log=lambda m: holder[0].log.emit(m),
-                                            cached_blocks=cached_blocks, cached_voice=cached_voice)
+                                            cached_blocks=cached_blocks, cached_voice=cached_voice,
+                                            time_fn=self.project.to_stream)
 
         w = Worker(job)
         holder.append(w)
@@ -1064,8 +1065,11 @@ class MainWindow(QMainWindow):
         self.show_more(first=True)
         n = len(res.highlights)
         note = getattr(res, "word_note", "")
+        judged = getattr(self, "_judged_with", "voice & energy")
+        if note and note not in ("ai", "words"):
+            judged = "voice & energy ONLY - the AI didn't read anything"
         msg = (f"Found {n} possible moment{'s' if n != 1 else ''} - showing the best {min(n, self.n_clips.value())}"
-               f"  ·  judged by {getattr(self, '_judged_with', 'voice & energy')}")
+               f"  ·  judged by {judged}")
         if note and note not in ("ai", "words"):
             msg += f"  ·  ⚠ {note}"
             self.statusBar().showMessage("⚠ " + note, 10000)

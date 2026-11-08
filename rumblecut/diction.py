@@ -108,10 +108,12 @@ def _window_lines(segs: list[Segment]) -> str:
 def ai_spans(windows: list[tuple[float, float, list[Segment]]],
              on_progress: Callable[[float, str], None] | None = None,
              cancel: Callable[[], bool] | None = None, workers: int | None = None,
-             guidance: str = "", on_log: Callable[[str], None] | None = None) -> list[Span]:
+             guidance: str = "", on_log: Callable[[str], None] | None = None,
+             show_time: Callable[[float], str] | None = None) -> list[Span]:
     """windows: (start, end, segments) blocks of transcript. One AI call per block."""
     if workers is None:
         workers = 4 if ai.settings()["mode"] == "cloud" else 1
+    st = show_time or _fmt          # how times are shown in the log (stream time, not file time)
     todo = [(a, b, segs) for a, b, segs in windows if any(t.strip() for _, _, t in segs)]
     spans: list[Span] = []
     errors: list[str] = []
@@ -159,18 +161,18 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
                 if on_log:
                     if found:
                         for sp in sorted(found, key=lambda x: x.start):
-                            on_log(f"✨ {_fmt(sp.start)}  {sp.label} {sp.score * 10:.0f}/10 - {sp.why}"
+                            on_log(f"✨ {st(sp.start)}  {sp.label} {sp.score * 10:.0f}/10 - {sp.why}"
                                    + (f"  “{sp.quote}”" if sp.quote else ""))
                     else:
-                        on_log(f"·  {_fmt(a)} – {_fmt(b)}: nothing stood out")
+                        on_log(f"·  {st(a)} – {st(b)}: nothing stood out")
             except ai.AIError as e:
                 errors.append(str(e))
                 if on_log:
-                    on_log(f"⚠  {_fmt(a)} – {_fmt(b)}: {e}")
+                    on_log(f"⚠  {st(a)} – {st(b)}: {e}")
             except Exception as e:      # a bad reply for one passage shouldn't stop the scan
                 errors.append(str(e))
                 if on_log:
-                    on_log(f"⚠  {_fmt(a)} – {_fmt(b)}: couldn't read the AI's answer ({e})")
+                    on_log(f"⚠  {st(a)} – {st(b)}: couldn't read the AI's answer ({e})")
             if on_progress:
                 on_progress(done / max(1, len(todo)), f"AI is reading what's said… ({done}/{len(todo)} passages)")
     if errors and not spans and len(errors) == len(todo):

@@ -184,7 +184,8 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     transcriber: Callable | None = None,
                     ai_reader: Callable | None = None,
                     guidance: str = "", on_log: Callable[[str], None] | None = None,
-                    cached_blocks: list | None = None, cached_voice=None) -> AnalysisResult:
+                    cached_blocks: list | None = None, cached_voice=None,
+                    time_fn: Callable[[float], float] | None = None) -> AnalysisResult:
     """Find the most interesting moments.
 
     How it's said (always): voice pitch vs the speaker's normal, how animated the voice is,
@@ -202,6 +203,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     end once it has settled, snap to pauses, and stay within min_len..max_len."""
     from . import diction, voice
     log = on_log or (lambda m: None)
+    show = (lambda t: _fmt(time_fn(t))) if time_fn else _fmt      # times as the user sees them
 
     min_len = float(min_len if min_len is not None else max(5.0, clip_length * 0.6))
     max_len = float(max_len if max_len is not None else max(min_len, clip_length * 1.5))
@@ -332,7 +334,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     segs = transcriber(src, a, b, cancel=cancel,
                                    on_progress=(lambda f, m, d=done_secs, ln=b - a: on_progress(
                                        t_lo + (t_hi - t_lo) * (d + max(0, f) * ln) / total_secs,
-                                       f"Transcribing what's said… ({_fmt(a)} – {_fmt(b)})")) if on_progress else None)
+                                       f"Transcribing what's said… ({show(a)} – {show(b)})")) if on_progress else None)
                 except Cancelled:
                     raise
                 except Exception as e:          # e.g. speech model can't download while offline
@@ -349,7 +351,7 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         if ai_reader is not None and blocks:
             try:
                 spans = ai_reader(blocks, on_progress=stage(0.75, 0.96), cancel=cancel,
-                                  guidance=guidance, on_log=log)
+                                  guidance=guidance, on_log=log, show_time=show)
                 word_note = "ai"
             except Cancelled:
                 raise
