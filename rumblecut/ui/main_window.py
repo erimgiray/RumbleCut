@@ -61,6 +61,28 @@ class ElidedLabel(QLabel):
         QLabel.setText(self, fm.elidedText(self._full, Qt.ElideRight, max(20, self.width() - 4)))
 
 
+def _to_recycle_bin(path: str):
+    """Move a file to the Recycle Bin on Windows (so a mistake can be undone); delete elsewhere."""
+    if not os.path.exists(path):
+        return
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_NOERRORUI = 3, 0x40, 0x10, 0x4, 0x400
+        op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
+                             FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
+        res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if res != 0 or os.path.exists(path):
+            raise OSError(f"Windows couldn't move it to the Recycle Bin (code {res}) - is it open in another program?")
+    else:
+        os.remove(path)
+
+
 def asset(name: str) -> str:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     return str(base / "assets" / name)
@@ -131,7 +153,7 @@ class MainWindow(QMainWindow):
         self._toast.adjustSize()
         w = min(self._toast.width(), self.width() - 40)
         self._toast.resize(w, self._toast.height())
-        self._toast.move(self.width() - w - 20, self.height() - self._toast.height() - 20)
+        self._toast.move(self.width() - w - 20, 64)          # top-right, under the tabs
         self._toast.raise_()
         self._toast.show()
         self._toast_timer.start(4000)
@@ -172,6 +194,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ tab 1: get video
     def _build_get_tab(self) -> QWidget:
+        self._link_duration = 0.0
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(40, 30, 40, 30)
@@ -207,6 +230,7 @@ class MainWindow(QMainWindow):
         v.addLayout(row)
         self.link_info = QLabel("")
         self.link_info.setWordWrap(True)
+        self.link_info.hide()                                  # shown once “Check link” has something to say
         v.addWidget(self.link_info)
 
         part = QGroupBox()
@@ -214,25 +238,29 @@ class MainWindow(QMainWindow):
         self.part_only = QCheckBox("Only download part of the video")
         self.part_only.setToolTip("Skip the parts you don't need - much faster for long streams")
         self.ranges_edit = QLineEdit()
-        self.ranges_edit.setPlaceholderText("e.g.  1:05:00-1:20:00, 2:10:30-2:16:00     (h:mm:ss or mm:ss; "
-                                            "leave the end blank for 'to the end')")
+        self.ranges_edit.setPlaceholderText("e.g.  1:05:00-1:20:00, 2:10:30-2:16:00")
         self.ranges_edit.setEnabled(False)
         self.ranges_edit.returnPressed.connect(self.start_download)
-        self.ranges_info = QLabel("Works with Download (each range saved as its own video) and ⚡ Scan audio first "
-                                  "(the audio of each range is joined into one scan). Tip: press “Check link” "
-                                  "first to see the video's length.")
+        self.ranges_info = QLabel("")             # only shown to confirm the parts or flag a typo
         self.ranges_info.setObjectName("muted")
+        self.ranges_info.hide()
         self.ranges_info.setWordWrap(True)
         self.part_only.toggled.connect(self.ranges_edit.setEnabled)
         self.part_only.toggled.connect(lambda on: on and self.ranges_edit.setFocus())
         self.part_only.toggled.connect(lambda _: self._update_ranges_info())
         self.ranges_edit.textChanged.connect(lambda _: self._update_ranges_info())
+        # remember the box and the times across restarts (updates relaunch the app)
+        st = config.load_settings()
+        self.ranges_edit.setText(st.get("part_ranges", ""))
+        self.part_only.setChecked(bool(st.get("part_only", False)))
+        self.part_only.toggled.connect(lambda on: config.save_settings({"part_only": on}))
+        self.ranges_edit.editingFinished.connect(
+            lambda: config.save_settings({"part_ranges": self.ranges_edit.text().strip()}))
         pg.addWidget(self.part_only, 0, 0)
         pg.addWidget(self.ranges_edit, 0, 1)
         pg.addWidget(self.ranges_info, 1, 1)
         pg.setColumnStretch(1, 1)
         v.addWidget(part)
-        self._link_duration = 0.0
         prow = QHBoxLayout()
         self.dl_progress = QProgressBar()
         self.dl_progress.setTextVisible(True)
@@ -258,37 +286,154 @@ class MainWindow(QMainWindow):
         b2.clicked.connect(lambda: open_folder(config.download_dir()))
         orow.addWidget(b2)
         v.addLayout(orow)
-        self.history = QListWidget()
-        self.history.itemDoubleClicked.connect(self._open_history_item)
-        v.addWidget(self.history, 1)
-        hint = QLabel("Double-click a download to start clipping it.")
+        lists = QHBoxLayout()
+        self.hist_audio = QListWidget()
+        self.hist_video = QListWidget()
+        self.hist_audio_lbl = section("🔊 Audio scans")
+        self.hist_video_lbl = section("🎬 Videos")
+        for lst, lbl in ((self.hist_audio, self.hist_audio_lbl), (self.hist_video, self.hist_video_lbl)):
+            lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            lst.itemDoubleClicked.connect(self._open_history_item)
+            lst.itemSelectionChanged.connect(self._update_delete_button)
+            col = QVBoxLayout()
+            col.addWidget(lbl)
+            col.addWidget(lst, 1)
+            lists.addLayout(col, 1)
+        v.addLayout(lists, 1)
+        brow2 = QHBoxLayout()
+        hint = QLabel("Double-click to start clipping · Ctrl/Shift-click to select several")
         hint.setObjectName("muted")
-        v.addWidget(hint)
+        brow2.addWidget(hint, 1)
+        self.btn_del = QPushButton("🗑 Delete selected")
+        self.btn_del.setObjectName("danger")
+        self.btn_del.setEnabled(False)
+        self.btn_del.setToolTip("Move the selected downloads to the Recycle Bin (Delete key)")
+        self.btn_del.clicked.connect(self.delete_downloads)
+        brow2.addWidget(self.btn_del)
+        v.addLayout(brow2)
+        dk = QAction(w)
+        dk.setShortcut(QKeySequence.Delete)
+        dk.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        dk.triggered.connect(self.delete_downloads)
+        w.addAction(dk)
         return w
 
+    AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".opus", ".ogg", ".wav", ".flac"}
+    VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v"}
+
     def _refresh_history(self):
-        self.history.clear()
+        """Audio scans and videos in separate lists: everything in the history that still exists,
+        plus any other media files sitting in the downloads folder."""
+        for lst in (self.hist_audio, self.hist_video):
+            lst.clear()
         hist = config.load_settings().get("history", [])
+        seen = set()
+        entries = []
         for h in hist:
-            if not os.path.exists(h.get("path", "")):
-                continue
+            path = h.get("path", "")
+            if path and os.path.exists(path) and os.path.normcase(path) not in seen:
+                seen.add(os.path.normcase(path))
+                entries.append(h)
+        try:
+            extra = sorted((p for p in config.download_dir().iterdir()
+                            if p.suffix.lower() in self.AUDIO_EXTS | self.VIDEO_EXTS
+                            and os.path.normcase(str(p)) not in seen),
+                           key=os.path.getmtime, reverse=True)
+        except OSError:
+            extra = []
+        for p in extra:
+            entries.append({"path": str(p), "title": p.stem})
+        try:   # unfinished downloads left by a cancel (resume by downloading again, or delete)
+            for p in sorted(config.download_dir().glob("*.part"), key=os.path.getmtime, reverse=True):
+                inner = Path(p.stem)                       # "name.aac" from "name.aac.part"
+                if inner.suffix.lower() in self.AUDIO_EXTS | self.VIDEO_EXTS or "audio" in p.name:
+                    entries.append({"path": str(p), "title": "⏸ Unfinished: " + inner.stem, "partial": True,
+                                    "audio": inner.suffix.lower() in self.AUDIO_EXTS or " audio" in p.name})
+        except OSError:
+            pass
+        for h in entries:
+            path = h["path"]
+            ext = Path(path).suffix.lower()
+            is_audio = h.get("audio") or ext in self.AUDIO_EXTS
+            try:
+                mb = os.path.getsize(path) / 1e6
+            except OSError:
+                mb = 0
             length = h.get("length") or h.get("duration", 0)
-            it = QListWidgetItem(f"{h.get('title', Path(h['path']).stem)}    ·    {fmt_time(length)}"
-                                 f"    ·    {h.get('uploader', '')}")
-            it.setData(Qt.UserRole, h["path"])
+            bits = [h.get("title") or Path(path).stem]
+            if length:
+                bits.append(fmt_time(length))
+            bits.append(f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB")
+            it = QListWidgetItem("   ·   ".join(bits))
+            it.setData(Qt.UserRole, path)
             it.setData(Qt.UserRole + 1, h)
-            it.setToolTip(h["path"])
-            self.history.addItem(it)
-        if self.history.count() == 0:
-            for p in sorted(config.download_dir().glob("*.mp4"), key=os.path.getmtime, reverse=True)[:30]:
-                it = QListWidgetItem(p.stem)
-                it.setData(Qt.UserRole, str(p))
-                self.history.addItem(it)
+            it.setToolTip(path)
+            (self.hist_audio if is_audio else self.hist_video).addItem(it)
+        self.hist_audio_lbl.setText(f"🔊 Audio scans ({self.hist_audio.count()})")
+        self.hist_video_lbl.setText(f"🎬 Videos ({self.hist_video.count()})")
+        self._update_delete_button()
+
+    def _selected_downloads(self) -> list[str]:
+        return [it.data(Qt.UserRole) for lst in (self.hist_audio, self.hist_video) for it in lst.selectedItems()]
+
+    def _update_delete_button(self):
+        n = len(self._selected_downloads())
+        self.btn_del.setEnabled(n > 0)
+        self.btn_del.setText(f"🗑 Delete {n} selected" if n > 1 else "🗑 Delete selected")
+
+    def delete_downloads(self):
+        paths = self._selected_downloads()
+        if not paths:
+            return
+        total = sum(os.path.getsize(p) for p in paths if os.path.exists(p)) / 1e6
+        in_use = [p for p in paths if os.path.normcase(p) == os.path.normcase(self.project.source or "")
+                  or any(os.path.normcase(c.source) == os.path.normcase(p) for c in self.project.clips)]
+        names = "\n".join("•  " + Path(p).name for p in paths[:8]) + ("\n…" if len(paths) > 8 else "")
+        msg = (f"Move {len(paths)} download{'s' if len(paths) > 1 else ''} ({total:,.0f} MB) to the Recycle Bin?\n\n"
+               f"{names}")
+        if in_use:
+            msg += ("\n\nSome of these are open in the Clip studio - it will be cleared. "
+                    "Save the project first if you want to keep your clip list.")
+        if QMessageBox.question(self, "Delete downloads", msg) != QMessageBox.Yes:
+            return
+        if in_use:                               # release the files so Windows lets us remove them
+            if self.player:
+                self.player.stop()
+                self.player.setSource(QUrl())
+            self.project = editor.Project(export=self.project.export)
+            self.result, self.info, self.candidates = None, None, []
+            self.src_label.setText("No video loaded")
+            self.timeline.set_data(0)
+            self.timeline.set_clips([])
+            self._fill_clip_list()
+            self._update_more_button()
+            self._update_audio_banner()
+        failed = []
+        for p in paths:
+            try:
+                _to_recycle_bin(p)
+                for side in (p + ".ytdl", str(Path(p).with_suffix("")) + ".ytdl"):   # yt-dlp resume notes
+                    if os.path.exists(side):
+                        os.remove(side)
+            except Exception as e:
+                failed.append(f"{Path(p).name}: {e}")
+        gone = {os.path.normcase(p) for p in paths if not os.path.exists(p)}
+        hist = [h for h in config.load_settings().get("history", [])
+                if os.path.normcase(h.get("path", "")) not in gone]
+        config.save_settings({"history": hist})
+        self._has_video_cache.clear()
+        self._refresh_history()
+        if failed:
+            QMessageBox.warning(self, "Couldn't delete everything", "\n".join(failed))
+        else:
+            self.statusBar().showMessage(f"Moved {len(paths)} download{'s' if len(paths) > 1 else ''} "
+                                         f"({total:,.0f} MB) to the Recycle Bin", 5000)
 
     def check_link(self):
         url = self.url_edit.text().strip()
         if not url:
             return
+        self.link_info.show()
         self.link_info.setText("Checking…")
         w = Worker(lambda url, on_progress=None, cancel=None: downloader.fetch_info(url), url)
         w.done.connect(lambda info: setattr(self, "_link_duration", float(info.get("duration") or 0))
@@ -318,7 +463,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Check the times", str(e))
                 self.ranges_edit.setFocus()
                 return
-        config.save_settings({"download_quality": self.quality.currentText()})
+        config.save_settings({"download_quality": self.quality.currentText(),
+                              "part_ranges": self.ranges_edit.text().strip()})
+        dur = self._link_duration or 0
+        if ranges:
+            total = downloader.ranges_total(ranges, dur or None)
+            amount = (f" ({fmt_time(total)}" + (f" of {fmt_time(dur)})" if dur else ")")) if total else ""
+            scope = (f"Audio of {len(ranges)} part{'s' if len(ranges) > 1 else ''}{amount}" if audio_only
+                     else f"Video: {len(ranges)} part{'s' if len(ranges) > 1 else ''}{amount}")
+        else:
+            scope = "Audio of the whole stream" if audio_only else "The whole video"
         self.btn_dl.setEnabled(False)
         self.btn_scan.setEnabled(False)
         self.btn_dl_cancel.setEnabled(True)
@@ -326,8 +480,9 @@ class MainWindow(QMainWindow):
         self.dl_status.setText("Starting download…")
         w = Worker(downloader.download, url, self.quality.currentText(), config.download_dir(), ranges,
                    audio_only=audio_only)
-        if audio_only:
-            self.dl_status.setText("Downloading the audio only…")
+        self.dl_status.setText(scope + "  ·  starting…"
+                               + ("   (to fetch only some parts, tick “Only download part of the video”)"
+                                  if not ranges else ""))
         self.btn_dl_cancel.clicked.connect(w.cancel)
 
         def prog(f, msg):
@@ -337,7 +492,7 @@ class MainWindow(QMainWindow):
                 self.dl_progress.setRange(0, 1000)
                 self.dl_progress.setValue(int(f * 1000))
                 self.dl_progress.setFormat(f"{f * 100:.1f}%")
-            self.dl_status.setText(msg)
+            self.dl_status.setText(f"{scope}  ·  {msg}")
 
         def finished(res: downloader.DownloadResult):
             if audio_only:
@@ -741,19 +896,20 @@ class MainWindow(QMainWindow):
 
     def _open_history_item(self, it: QListWidgetItem):
         h = it.data(Qt.UserRole + 1) or {}
+        if h.get("partial"):
+            QMessageBox.information(self, APP_NAME, "This download didn't finish. Paste the same link and press "
+                                    "Download / ⚡ Scan audio first again to resume it - or delete it.")
+            return
         self.load_video(it.data(Qt.UserRole), title=h.get("title", ""), url=h.get("url", ""),
                         offset=float(h.get("offset", 0.0)), segments=h.get("segments") or [])
 
     def _update_ranges_info(self):
-        if not self.part_only.isChecked():
-            self.ranges_info.setText("Works with Download (each range saved as its own video) and ⚡ Scan audio "
-                                     "first (the audio of each range is joined into one scan). Tip: press "
-                                     "“Check link” first to see the video's length.")
-            return
         txt = self.ranges_edit.text().strip()
-        if not txt:
-            self.ranges_info.setText("Type the start and end of each part you want, separated by commas.")
+        if not self.part_only.isChecked() or not txt:
+            self.ranges_info.setText("")
+            self.ranges_info.hide()
             return
+        self.ranges_info.show()
         dur = self._link_duration or None
         try:
             rs = downloader.parse_ranges(txt, dur)
@@ -2258,6 +2414,8 @@ QPushButton:hover, QToolButton:hover {{ background: #333844; }}
 QPushButton:disabled {{ color: #5b6370; background: #20232a; }}
 QPushButton#primary {{ background: {ACCENT}; color: #0b0d10; font-weight: 700; border: none; padding: 7px 18px; }}
 QPushButton#primary:hover {{ background: #9bd85c; }}
+QPushButton#danger {{ color: #fca5a5; border-color: #7f1d1d; }}
+QPushButton#danger:hover {{ background: #3b1717; }}
 QPushButton#primary:disabled {{ background: #3d5a26; color: #1b1d22; }}
 QListWidget {{ background: #121418; border: 1px solid #2c3038; border-radius: 8px; }}
 QListWidget::item {{ padding: 6px; border-radius: 6px; }}

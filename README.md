@@ -48,6 +48,10 @@ Options:
 
    Tick **Only download part of the video** first, and the audio scan only fetches those parts too. They're joined into one scan, and every time shown is still the real stream time. Only those parts of the video are downloaded, with 3 seconds of padding either side. They become normal clips you can edit and export.
 
+**Your downloads** shows **🔊 Audio scans** and **🎬 Videos** in separate lists, with each file's length and size. Unfinished downloads left behind by a cancel are marked ⏸; download again to resume, or delete them. Select one or more (Ctrl/Shift-click) and press **🗑 Delete selected** (or the Delete key) to move them to the Recycle Bin.
+
+The **Only download part of the video** box and its times are remembered between restarts. They apply to both **Download** and **⚡ Scan audio first**, and the status line always says what's being fetched (e.g. "Audio of 2 parts (25:00 of 4:05:48)" or "Audio of the whole stream").
+
 **② Clip studio**
 - **How moments are judged** (the **Judge by** box):
   - **Voice & energy only** (fast): pitch compared with the speaker's normal (upbeat = higher), how animated the voice is, talking pace, laughter, and loudness as a minor signal.
