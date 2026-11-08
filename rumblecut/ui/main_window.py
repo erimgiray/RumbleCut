@@ -1545,7 +1545,7 @@ class MainWindow(QMainWindow):
         self.ai_model.setEditable(True)
         self.ai_model.setMinimumWidth(200)
         if cfg["local_model"]:
-            self.ai_model.addItem(cfg["local_model"])
+            self.ai_model.addItem(cfg["local_model"], cfg["local_model"])
         self.ai_model.lineEdit().setPlaceholderText("pick or type a model name")
         refresh = QToolButton()
         refresh.setText("⟳")
@@ -1576,9 +1576,12 @@ class MainWindow(QMainWindow):
         av.addWidget(self.ai_cloud_box)
         sf = QFormLayout()
         self.s_whisper = QComboBox()
-        self.s_whisper.addItems(["tiny", "base", "small", "medium", "large-v3"])
-        self.s_whisper.setCurrentText(s.get("whisper_model", "small"))
-        self.s_whisper.currentTextChanged.connect(lambda t: self._save_setting("whisper_model", t))
+        for name, size in transcribe.WHISPER_MODELS:          # smallest first
+            self.s_whisper.addItem(f"{name}  ·  {size}", name)
+        self.s_whisper.setCurrentIndex(max(0, self.s_whisper.findData(s.get("whisper_model", "small"))))
+        self.s_whisper.setToolTip("Bigger = more accurate but slower. The size is a one-time download.")
+        self.s_whisper.currentIndexChanged.connect(
+            lambda _: self._save_setting("whisper_model", self.s_whisper.currentData()))
         self.s_whisper.setEnabled(transcribe.available())
         sf.addRow("Speech-to-text", self.s_whisper)
         sl = QLabel("Speech is always turned into text on this PC (Whisper)." if transcribe.available()
@@ -1622,7 +1625,8 @@ class MainWindow(QMainWindow):
         self.ai_kind.currentIndexChanged.connect(kind_changed)
         self.ai_url.editingFinished.connect(lambda: (self._save_setting("local_url", self.ai_url.text().strip()),
                                                      self.refresh_local_models(quiet=True)))
-        self.ai_model.currentTextChanged.connect(lambda t: t.strip() and self._save_setting("local_model", t.strip()))
+        self.ai_model.currentTextChanged.connect(lambda _: (n := self._ai_model_name()) and
+                                                 self._save_setting("local_model", n))
 
         def key_entered():
             k = self.ai_key.text().strip()
@@ -1724,6 +1728,13 @@ class MainWindow(QMainWindow):
         self._start(w)
 
     # ---- AI models
+    def _ai_model_name(self) -> str:
+        """The chosen model's real name (the list shows 'name · params · size')."""
+        i = self.ai_model.currentIndex()
+        if i >= 0 and self.ai_model.itemText(i) == self.ai_model.currentText():
+            return (self.ai_model.itemData(i) or self.ai_model.itemText(i)).strip()
+        return self.ai_model.currentText().strip()      # typed by hand
+
     def refresh_local_models(self, quiet: bool = True):
         if not hasattr(self, "ai_model"):
             return
@@ -1734,17 +1745,21 @@ class MainWindow(QMainWindow):
         w.background = True
 
         def done(models):
-            cur = self.ai_model.currentText().strip()
+            cur = self._ai_model_name() or ai.settings()["local_model"]
             self.ai_model.blockSignals(True)
             self.ai_model.clear()
-            self.ai_model.addItems(models)
-            if cur:
-                self.ai_model.setCurrentText(cur)
+            for m in models:                                   # already smallest first
+                self.ai_model.addItem(ai.model_label(m), m["name"])
+            i = self.ai_model.findData(cur) if cur else -1
+            if i >= 0:
+                self.ai_model.setCurrentIndex(i)
+            elif cur:
+                self.ai_model.setEditText(cur)                 # a name typed by hand
             elif models:
                 self.ai_model.setCurrentIndex(0)
             self.ai_model.blockSignals(False)
-            if self.ai_model.currentText().strip():
-                self._save_setting("local_model", self.ai_model.currentText().strip())
+            if self._ai_model_name():
+                self._save_setting("local_model", self._ai_model_name())
             self.ai_local_status.setText(f"<span style='color:{ACCENT}'>✔ Connected</span> · {len(models)} model(s) "
                                          "installed" if models else
                                          "Connected, but no models are installed yet. "

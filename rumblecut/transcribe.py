@@ -22,6 +22,10 @@ from . import ffmpeg_tools as ft
 from .ffmpeg_tools import Cancelled
 
 Segment = tuple[float, float, str]
+
+# Speech models, smallest first, with their one-time download size.
+WHISPER_MODELS = [("tiny", "75 MB"), ("base", "145 MB"), ("small", "484 MB"),
+                  ("medium", "1.5 GB"), ("large-v3", "3.1 GB")]
 _model_cache: dict = {}
 
 

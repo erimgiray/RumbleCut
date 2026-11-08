@@ -130,18 +130,44 @@ def describe() -> str:
 
 
 # ----------------------------------------------------------------------------- local models
-def list_local_models(kind: str | None = None, url: str | None = None) -> list[str]:
+def fmt_size(n: float | None) -> str:
+    if not n:
+        return ""
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
+def model_label(m: dict) -> str:
+    """'llama3.1:8b  ·  8.0B  ·  4.9 GB' - name, parameter count and size on disk."""
+    parts = [m["name"]] + [x for x in (m.get("params"), fmt_size(m.get("size"))) if x]
+    return "  ·  ".join(parts)
+
+
+def list_local_models(kind: str | None = None, url: str | None = None) -> list[dict]:
+    """Installed models as {"name", "size" (bytes or None), "params"}, smallest first."""
     c = settings()
     kind, url = kind or c["local_kind"], (url or c["local_url"]).rstrip("/")
     try:
         if kind == "ollama":
-            return sorted(m["name"] for m in _get(f"{url}/api/tags").get("models", []))
-        return sorted(m["id"] for m in _get(f"{url}/v1/models").get("data", []))
+            models = [{"name": m["name"], "size": m.get("size"),
+                       "params": (m.get("details") or {}).get("parameter_size", "")}
+                      for m in _get(f"{url}/api/tags").get("models", [])]
+        else:
+            models = [{"name": m["id"], "size": None, "params": ""}
+                      for m in _get(f"{url}/v1/models").get("data", [])]
+            try:   # LM Studio's own API also reports file sizes
+                extra = {m.get("id"): m for m in _get(f"{url}/api/v0/models").get("data", [])}
+                for m in models:
+                    e = extra.get(m["name"]) or {}
+                    m["size"] = e.get("size_bytes") or e.get("size")
+                    m["params"] = e.get("params") or ""
+            except Exception:
+                pass
     except Exception as e:
         name = "Ollama" if kind == "ollama" else "the local model server"
         raise AIError(f"{name} isn't running at {url}. "
                       + ("Install it from ollama.com, then run e.g. 'ollama pull llama3.1'." if kind == "ollama"
                          else "Start the server in LM Studio (Developer tab) or your tool of choice.")) from e
+    return sorted(models, key=lambda m: (m["size"] is None, m["size"] or 0, m["name"].lower()))
 
 
 # ----------------------------------------------------------------------------- one call for all features
