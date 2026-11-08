@@ -87,6 +87,8 @@ class Clip:
     title: str = ""
     score: float = 0.0
     reasons: list[str] = field(default_factory=list)
+    why: list[str] = field(default_factory=list)      # what was heard / seen
+    timing: list[str] = field(default_factory=list)   # why it starts and ends where it does
     enabled: bool = True
     # effects
     fade_in: float = 0.25
@@ -442,7 +444,7 @@ def export_project(project: Project, out_dir: str | Path,
         for i, c in enumerate(clips, 1):
             if cancel and cancel():
                 raise Cancelled()
-            name = f"{i:02d} - {ft.safe_filename(c.title or f'Highlight {i}')}"
+            name = f"{i:02d} - {ft.safe_filename((c.title or f'Highlight {i}').replace(':', '.'))}"
             out = out_dir / f"{name}.mp4"
             render_clip(c, s, out, cancel=cancel,
                         on_progress=lambda fr, i=i: prog(fr, f"Exporting clip {i}/{len(clips)}"))

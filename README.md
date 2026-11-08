@@ -48,6 +48,12 @@ Options:
 
 **② Clip studio**
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
+- **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
+- **How each clip's time range is chosen:**
+  1. The clip covers the stretch where the excitement is clearly above normal around the peak.
+  2. It starts a few seconds earlier, so viewers get the build-up, and ends 2 s after the energy settles.
+  3. It's kept between your **Min length** and **Max length**. Short moments get extra lead-in; long ones are trimmed around their peak.
+  4. Both ends are moved to natural pauses (or scene cuts), so nobody is cut off mid-word.
 - Click a clip to preview it. Use **[ Set start / Set end ]** (keys `I` / `O`) to trim, drag clips to reorder them, and untick the ones you don't want.
 - **Effects per clip:**
   - speed (0.5× to 2×)

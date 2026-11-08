@@ -39,7 +39,10 @@ class Highlight:
     end: float
     peak: float
     score: float                     # 0-100
-    reasons: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)      # short labels for the clip list
+    why: list[str] = field(default_factory=list)          # plain-English: what was heard / seen
+    timing: list[str] = field(default_factory=list)       # plain-English: why this start and end
+    kind: str = "Moment"                                  # one-word label used in the title
 
     @property
     def duration(self) -> float:
@@ -139,6 +142,11 @@ def _norm01(x: np.ndarray) -> np.ndarray:
     return np.clip((x - lo) / (hi - lo), 0, 1)
 
 
+def _fmt(t: float) -> str:
+    t = int(round(t))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
 def _snap_to_pause(t: float, loud: np.ndarray, window: float = 2.5) -> float:
     i = int(round(t / HOP))
     w = int(window / HOP)
@@ -170,7 +178,16 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                     transcript: list[tuple[float, float, str]] | None = None,
                     keywords: list[str] | None = None,
                     on_progress: ProgressFn | None = None,
-                    cancel: Callable[[], bool] | None = None) -> AnalysisResult:
+                    cancel: Callable[[], bool] | None = None,
+                    min_len: float | None = None, max_len: float | None = None,
+                    lead_in: float = 4.0) -> AnalysisResult:
+    """Clips follow each moment: they start when the energy begins to build (plus `lead_in`
+    seconds of context), end once it has settled, snap to pauses, and stay within
+    min_len..max_len. Without min/max, both default to around `clip_length`."""
+    min_len = float(min_len if min_len is not None else max(5.0, clip_length * 0.6))
+    max_len = float(max_len if max_len is not None else max(min_len, clip_length * 1.5))
+    if max_len < min_len:
+        min_len, max_len = max_len, min_len
     info = MediaInfo(src)
     dur = info.duration
     if dur <= 0:
@@ -232,8 +249,8 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
     score = _norm01(score)
 
     # Peak picking with non-maximum suppression
-    L = max(5.0, float(clip_length))
-    gap_hops = int(max(min_gap, L * 0.75) / HOP)
+    L = max(5.0, (min_len + max_len) / 2)
+    gap_hops = int(max(min_gap, min_len * 0.75) / HOP)
     order = np.argsort(-score)
     taken = np.zeros(n, dtype=bool)
     picks: list[int] = []
@@ -249,36 +266,108 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         taken[max(0, i - gap_hops): i + gap_hops + 1] = True
 
     scene_arr = np.asarray(scene_t) if scene_t else None
+    floor = float(np.percentile(score, 60)) if len(score) else 0.0
     highlights: list[Highlight] = []
     for i in picks:
         peak = i * HOP
-        start = peak - 0.6 * L          # most of the clip is the build-up to the moment
+        # 1) the moment itself: where the excitement is clearly above normal around the peak
+        thr = max(0.45 * float(score[i]), floor)
+        limit = int(max_len / HOP)
+        a = i
+        while a > 0 and i - a < limit and score[a - 1] > thr:
+            a -= 1
+        b = i
+        while b < n - 1 and b - i < limit and score[b + 1] > thr:
+            b += 1
+        ev_start, ev_end = a * HOP, b * HOP
+        timing = [f"The excitement peaks at {_fmt(peak)}."]
+        if ev_end - ev_start >= 2:
+            timing.append(f"It starts building at {_fmt(ev_start)} and settles by {_fmt(ev_end)}.")
+
+        # 2) add context: a lead-in so viewers see what led up to it, and a short tail
+        start, end = ev_start - lead_in, ev_end + 2.0
+        timing.append(f"The clip starts {lead_in:.0f} s before that so viewers get the build-up, "
+                      "and runs 2 s past the end.")
+
+        # 3) respect min / max length (extend mostly before the peak, trim mostly after it)
+        length = end - start
+        if length < min_len:
+            extra = min_len - length
+            start -= extra * 0.6
+            end += extra * 0.4
+            timing.append(f"Lengthened to your minimum of {min_len:.0f} s (extra time added mostly before the moment).")
+        elif length > max_len:
+            start = max(start, peak - 0.65 * max_len)
+            end = start + max_len
+            timing.append(f"Shortened to your maximum of {max_len:.0f} s, keeping the peak and what led up to it.")
+
+        # 4) snap to natural cut points without breaking the limits
+        s0, e0 = start, end
         start = _snap_to_pause(start, short)
+        end = _snap_to_pause(end, short, window=3.0)
+        snapped_scene = False
         if scene_arr is not None and len(scene_arr):
             near = scene_arr[np.abs(scene_arr - start) < 2.0]
             if len(near):
                 start = float(near[np.argmin(np.abs(near - start))])
-        start = max(0.0, min(start, max(0.0, dur - L)))
-        end = _snap_to_pause(start + L, short, window=3.0)
-        end = min(dur, max(end, start + 0.6 * L, peak + 1.5))   # never cut off the moment itself
+                snapped_scene = True
+        if end - start < min_len or end - start > max_len:      # snapping broke a limit: undo it
+            start, end = s0, e0
+        else:
+            moved = []
+            if abs(start - s0) > 0.4:
+                moved.append("start")
+            if abs(end - e0) > 0.4:
+                moved.append("end")
+            if moved:
+                what = " and ".join(moved)
+                timing.append(f"The {what} {'were' if len(moved) > 1 else 'was'} moved to "
+                              f"{'a scene cut' if snapped_scene and 'start' in moved else ('natural pauses' if len(moved) > 1 else 'a natural pause')} "
+                              "so speech isn't cut mid-word.")
+        # 5) keep inside the file and never cut off the moment itself
+        if start < 0:
+            end, start = min(dur, end - start), 0.0
+        if end > dur:
+            start, end = max(0.0, start - (end - dur)), dur
+        end = max(end, min(dur, peak + 1.5))
 
+        # what was heard / seen, in plain English
         reasons: list[str] = []
+        why: list[str] = []
+        kind = "Moment"
         if excite[i] > 1.5 or dev[i] > 4:
             reasons.append(f"Volume spike (+{max(dev[i], 0):.0f} dB over normal)")
-        if sustain[i] > 1.0:
-            reasons.append("Sustained high energy")
+            why.append(f"Loud: {max(dev[i], 0):.0f} dB louder than the typical level of the 2 minutes around it.")
+            kind = "Loud moment"
         if rise[i] > 6:
             reasons.append("Sudden reaction")
+            why.append(f"Sudden reaction: the volume jumped by about {rise[i]:.0f} dB within a few seconds.")
+            kind = "Reaction"
+        if sustain[i] > 1.0:
+            reasons.append("Sustained high energy")
+            why.append("Stays heated: the energy remained well above normal for 10+ seconds, not just one shout.")
+            if kind == "Moment":
+                kind = "Heated stretch"
         if scene_t and scene_density[i] > np.percentile(scene_density, 90):
+            cuts = int(np.sum(np.abs(np.asarray(scene_t) - peak) < 6))
             reasons.append("Lots of on-screen action")
+            why.append(f"Busy on screen: {cuts} visual cuts or big changes within 6 s of the peak.")
+            if kind == "Moment":
+                kind = "Action"
         if i in kw_label or (transcript and kw[i] > 0):
             lab = kw_label.get(i) or next((kw_label[j] for j in range(i - 12, i + 12) if j in kw_label), None)
             if lab:
                 reasons.append(f'Said "{lab}"')
+                why.append(f'Hype words: “{lab}” was said here.')
+                kind = f'“{lab.capitalize()}”'
         if not reasons:
             reasons.append("Above-average energy")
+            why.append("No single big spike, but the overall energy here is higher than most of the stream.")
+        top = max(1, int(round(100.0 * float(np.mean(score > score[i])))) or 1)
+        why.append(f"Excitement score {score[i] * 100:.0f}/100: in the top {top}% of the whole stream.")
         highlights.append(Highlight(start=round(start, 2), end=round(end, 2), peak=round(peak, 2),
-                                    score=round(float(score[i]) * 100, 1), reasons=reasons))
+                                    score=round(float(score[i]) * 100, 1), reasons=reasons,
+                                    why=why, timing=timing, kind=kind))
 
     highlights.sort(key=lambda h: -h.score)
     if on_progress:

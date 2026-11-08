@@ -35,6 +35,32 @@ except Exception:  # pragma: no cover - multimedia missing
 ACCENT = "#85C742"
 
 
+class ElidedLabel(QLabel):
+    """A label that shortens long text with '…' instead of forcing the window wider."""
+    def __init__(self, text=""):
+        super().__init__()
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full = text or ""
+        self.setToolTip(self._full if len(self._full) > 60 else "")
+        self._elide()
+
+    def text(self):
+        return self._full
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._elide()
+
+    def _elide(self):
+        fm = self.fontMetrics()
+        QLabel.setText(self, fm.elidedText(self._full, Qt.ElideRight, max(20, self.width() - 4)))
+
+
 def asset(name: str) -> str:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     return str(base / "assets" / name)
@@ -83,11 +109,32 @@ class MainWindow(QMainWindow):
         self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self._build_menu()
-        self.setStatusBar(QStatusBar())
+        sb = QStatusBar()                  # kept for messages, but never shown as a strip
+        self.setStatusBar(sb)
+        sb.hide()
+        self._toast = QLabel(self)
+        self._toast.setObjectName("toast")
+        self._toast.hide()
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._toast.hide)
+        sb.messageChanged.connect(self._show_toast)
         self._check_ffmpeg()
         self._refresh_history()
         if config.load_settings().get("auto_update_check", True):
             QTimer.singleShot(3000, lambda: self.check_updates(silent=True))
+
+    def _show_toast(self, msg: str):
+        if not msg:
+            return
+        self._toast.setText(msg)
+        self._toast.adjustSize()
+        w = min(self._toast.width(), self.width() - 40)
+        self._toast.resize(w, self._toast.height())
+        self._toast.move(self.width() - w - 20, self.height() - self._toast.height() - 20)
+        self._toast.raise_()
+        self._toast.show()
+        self._toast_timer.start(4000)
 
     # ------------------------------------------------------------------ menu
     def _build_menu(self):
@@ -354,15 +401,21 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(10, 8, 10, 8)
 
         # analysis controls
-        bar = QHBoxLayout()
-        self.src_label = QLabel("No video loaded")
+        self.src_label = ElidedLabel("No video loaded")
         self.src_label.setObjectName("h2")
-        bar.addWidget(self.src_label, 1)
+        v.addWidget(self.src_label)
+        bar = QHBoxLayout()
         s = config.load_settings()
         self.n_clips = QSpinBox(); self.n_clips.setRange(1, 50); self.n_clips.setValue(int(s.get("batch_size", 5)))
         self.n_clips.setToolTip("How many moments to show at a time - press “5 more” under the list for the next batch")
-        self.clip_len = QSpinBox(); self.clip_len.setRange(5, 300); self.clip_len.setSuffix(" s")
-        self.clip_len.setValue(int(s["clip_length"]))
+        self.min_len = QSpinBox(); self.min_len.setRange(3, 600); self.min_len.setSuffix(" s")
+        self.min_len.setValue(int(s.get("clip_min", 15)))
+        self.min_len.setToolTip("Shortest a clip can be. Short moments get extra lead-in time.")
+        self.max_len = QSpinBox(); self.max_len.setRange(5, 1200); self.max_len.setSuffix(" s")
+        self.max_len.setValue(int(s.get("clip_max", 45)))
+        self.max_len.setToolTip("Longest a clip can be. Long heated stretches are trimmed around their peak.")
+        self.min_len.valueChanged.connect(lambda x: self.max_len.value() < x and self.max_len.setValue(x))
+        self.max_len.valueChanged.connect(lambda x: self.min_len.value() > x and self.min_len.setValue(x))
         self.min_gap = QSpinBox(); self.min_gap.setRange(0, 1800); self.min_gap.setSuffix(" s")
         self.min_gap.setValue(int(s["min_gap"]))
         self.use_scenes = QCheckBox("Scene changes"); self.use_scenes.setChecked(bool(s["scene_detection"]))
@@ -372,11 +425,14 @@ class MainWindow(QMainWindow):
         self.use_words.setToolTip("Transcribes the stream and boosts moments where hype phrases are said."
                                   if transcribe.available() else
                                   "Install the optional 'faster-whisper' package to enable.")
-        for lbl, wdg in [("Show", self.n_clips), ("Length", self.clip_len), ("Min gap", self.min_gap)]:
+        self.min_gap.setToolTip("Minimum time between two moments, so you don't get near-duplicates")
+        for lbl, wdg in [("Show", self.n_clips), ("Min length", self.min_len), ("Max length", self.max_len),
+                         ("Gap", self.min_gap)]:
             bar.addWidget(QLabel(lbl))
             bar.addWidget(wdg)
         bar.addWidget(self.use_scenes)
         bar.addWidget(self.use_words)
+        bar.addStretch()
         self.btn_analyse = QPushButton("Find highlights")
         self.btn_analyse.setObjectName("primary")
         self.btn_analyse.clicked.connect(self.run_analysis)
@@ -385,9 +441,10 @@ class MainWindow(QMainWindow):
         prow = QHBoxLayout()
         self.an_progress = QProgressBar(); self.an_progress.setRange(0, 1000); self.an_progress.setMaximumHeight(14)
         self.an_progress.setTextVisible(False)
-        self.an_status = QLabel(""); self.an_status.setObjectName("muted")
+        self.an_status = ElidedLabel(""); self.an_status.setObjectName("muted")
         self.btn_an_cancel = QPushButton("Cancel"); self.btn_an_cancel.setEnabled(False)
-        prow.addWidget(self.an_progress, 1); prow.addWidget(self.an_status); prow.addWidget(self.btn_an_cancel)
+        self.an_progress.setMinimumWidth(120)
+        prow.addWidget(self.an_progress, 2); prow.addWidget(self.an_status, 3); prow.addWidget(self.btn_an_cancel)
         v.addLayout(prow)
 
         # audio-first banner
@@ -432,21 +489,29 @@ class MainWindow(QMainWindow):
         self.btn_more.clicked.connect(self.show_more)
         self.btn_more.hide()
         lv.addWidget(self.btn_more)
-        brow = QHBoxLayout()
-        for text, tip, fn in [("＋ Add at playhead", "New clip around the current position", self.add_clip_here),
-                              ("⧉ Duplicate", "", self.duplicate_clip), ("✖ Remove", "", self.remove_clip)]:
-            b = QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn); brow.addWidget(b)
-        lv.addLayout(brow)
-        self.btn_ai_all = QPushButton("✨ AI titles for all ticked clips")
+        brow = QGridLayout()
+        brow.setSpacing(4)
+        for col, (text, tip, fn) in enumerate([
+                ("＋ Add", "New clip around the current playhead position", self.add_clip_here),
+                ("⧉ Copy", "Duplicate the selected clip", self.duplicate_clip),
+                ("✖ Remove", "Remove the selected clip", self.remove_clip)]):
+            b = QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            brow.addWidget(b, 0, col)
+        self.btn_ai_all = QPushButton("✨ AI titles for ticked clips")
+        self.btn_ai_all.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.btn_ai_all.clicked.connect(lambda: self.ai_titles("all"))
-        lv.addWidget(self.btn_ai_all)
+        brow.addWidget(self.btn_ai_all, 1, 0, 1, 3)
+        lv.addLayout(brow)
+        self.btn_more.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        left.setMinimumWidth(240)
         split.addWidget(left)
 
         # centre: preview
-        mid = QWidget(); mv = QVBoxLayout(mid); mv.setContentsMargins(0, 0, 0, 0)
+        mid = QWidget(); mv = QVBoxLayout(mid); mv.setContentsMargins(8, 0, 8, 0)
         if HAVE_MM:
             self.video = QVideoWidget()
-            self.video.setMinimumSize(480, 270)
+            self.video.setMinimumSize(280, 158)
             self.player = QMediaPlayer(self)
             self.audio = None
             if not os.environ.get("RUMBLECUT_NO_AUDIO"):   # for headless test machines
@@ -465,34 +530,43 @@ class MainWindow(QMainWindow):
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_play_clip = QPushButton("▶ Play clip")
         self.btn_play_clip.clicked.connect(self.play_clip)
-        self.pos_label = QLabel("0:00"); self.pos_label.setMinimumWidth(110)
+        self.pos_label = QLabel("0:00"); self.pos_label.setMinimumWidth(60)
         self.btn_set_in = QPushButton("[  Set start"); self.btn_set_in.setShortcut("I")
         self.btn_set_in.clicked.connect(lambda: self._set_edge("start"))
         self.btn_set_out = QPushButton("Set end  ]"); self.btn_set_out.setShortcut("O")
         self.btn_set_out.clicked.connect(lambda: self._set_edge("end"))
         back = QToolButton(); back.setText("−5s"); back.clicked.connect(lambda: self.nudge(-5))
         fwd = QToolButton(); fwd.setText("+5s"); fwd.clicked.connect(lambda: self.nudge(5))
-        self.btn_preview = QPushButton("Preview with effects")
+        self.btn_preview = QPushButton("👁 Preview effects")
         self.btn_preview.setToolTip("Quick low-res render of the selected clip with all effects applied")
         self.btn_preview.clicked.connect(self.render_preview)
         self.vol = QSlider(Qt.Horizontal); self.vol.setRange(0, 100); self.vol.setValue(80); self.vol.setMaximumWidth(90)
         if self.player and self.audio:
             self.audio.setVolume(0.8)
             self.vol.valueChanged.connect(lambda x: self.audio.setVolume(x / 100))
-        for wdg in [self.btn_play, back, fwd, self.pos_label, self.btn_play_clip, self.btn_set_in,
-                    self.btn_set_out]:
+        # row 1: playback      row 2: clip actions
+        for wdg in [self.btn_play, back, fwd, self.pos_label]:
             tr.addWidget(wdg)
         tr.addStretch()
-        tr.addWidget(self.btn_preview)
         tr.addWidget(QLabel("🔊")); tr.addWidget(self.vol)
         mv.addLayout(tr)
+        tr2 = QHBoxLayout()
+        for wdg in [self.btn_play_clip, self.btn_set_in, self.btn_set_out]:
+            tr2.addWidget(wdg)
+        tr2.addStretch()
+        tr2.addWidget(self.btn_preview)
+        mv.addLayout(tr2)
         sp = QAction(self); sp.setShortcut(Qt.Key_Space); sp.triggered.connect(self.toggle_play)
         self.addAction(sp)
         split.addWidget(mid)
 
         # right: inspector
         split.addWidget(self._build_inspector())
-        split.setSizes([400, 680, 360])
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        split.setSizes([360, 640, 340])
         return root
 
     def _build_inspector(self) -> QWidget:
@@ -595,7 +669,7 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(box)
-        scroll.setMinimumWidth(330)
+        scroll.setMinimumWidth(280)
         self.inspector = box
         box.setEnabled(False)
         return scroll
@@ -674,11 +748,13 @@ class MainWindow(QMainWindow):
                 self, "Replace clips?", "Finding highlights again replaces your current clip list. Continue?") \
                 != QMessageBox.Yes:
             return
-        config.save_settings({"batch_size": self.n_clips.value(), "clip_length": self.clip_len.value(),
+        config.save_settings({"batch_size": self.n_clips.value(), "clip_min": self.min_len.value(),
+                              "clip_max": self.max_len.value(),
                               "min_gap": self.min_gap.value(), "scene_detection": self.use_scenes.isChecked(),
                               "transcript_boost": self.use_words.isChecked()})
         src = self.project.source
-        n, L, gap = 100, self.clip_len.value(), self.min_gap.value()   # rank all, show in batches
+        n, gap = 100, self.min_gap.value()   # rank all, show in batches
+        lo, hi = self.min_len.value(), self.max_len.value()
         scenes = self.use_scenes.isChecked() and bool(self.info and self.info.has_video)
         words = self.use_words.isChecked()
         dur = self.info.duration if self.info else 0
@@ -693,8 +769,8 @@ class MainWindow(QMainWindow):
                 prog = lambda f, m: on_progress(0.5 + f * 0.5, m)
             else:
                 prog = on_progress
-            return analysis.find_highlights(src, n, L, gap, scenes, transcript,
-                                            on_progress=prog, cancel=cancel)
+            return analysis.find_highlights(src, n, (lo + hi) / 2, gap, scenes, transcript,
+                                            on_progress=prog, cancel=cancel, min_len=lo, max_len=hi)
 
         w = Worker(job)
         self.btn_analyse.setEnabled(False)
@@ -735,7 +811,8 @@ class MainWindow(QMainWindow):
             self._shown_total = getattr(self, "_shown_total", 0) + 1
             self.project.clips.append(editor.Clip(
                 source=self.project.source, start=h.start, end=h.end, score=h.score, reasons=h.reasons,
-                title=f"Moment {self._shown_total} - {fmt_time(h.peak + self.project.offset).replace(':', '.')}"))
+                why=list(h.why), timing=list(h.timing),
+                title=f"{h.kind} at {fmt_time(h.peak + self.project.offset)}"))
         self._fill_clip_list()
         if take:
             self.clip_list.setCurrentRow(start_row)
@@ -800,6 +877,7 @@ class MainWindow(QMainWindow):
         thumbs = getattr(self, "_thumbs", {})
         for i, c in enumerate(self.project.clips):
             it = QListWidgetItem(self._item_text(i, c))
+            it.setToolTip(self._why_html(c))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
             it.setCheckState(Qt.Checked if c.enabled else Qt.Unchecked)
             t = thumbs.get((c.source, round((c.start + c.end) / 2, 1)))
@@ -808,7 +886,8 @@ class MainWindow(QMainWindow):
             it.setData(Qt.UserRole, id(c))
             self.clip_list.addItem(it)
         self.clip_list.blockSignals(False)
-        self.timeline.set_clips(self._spans(), row if keep_row else -1)
+        self.timeline.set_clips(self._spans(), row if keep_row else -1,
+                                [self._why_html(c) for c in self.project.clips])
         if keep_row and 0 <= row < self.clip_list.count():
             self.clip_list.setCurrentRow(row)
         elif not self.project.clips:
@@ -833,7 +912,7 @@ class MainWindow(QMainWindow):
     def select_clip(self, row: int):
         c = self.current_clip()
         self.inspector.setEnabled(c is not None)
-        self.timeline.set_clips(self._spans(), row)
+        self.timeline.set_clips(self._spans(), row, [self._why_html(c) for c in self.project.clips])
         if not c:
             return
         self._loading_inspector = True
@@ -848,6 +927,8 @@ class MainWindow(QMainWindow):
         self.i_end.setValue(c.end + c.offset)
         self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported")
         self.i_why.setText(" · ".join(c.reasons) or "Added manually")
+        self.i_why.setToolTip(self._why_html(c))
+        self.i_why.setText(self.i_why.text() + "   ⓘ")
         self.i_speed.setCurrentText(f"{c.speed:g}×")
         self.i_zoom.setValue(int(round(c.zoom * 100)))
         self.i_color.setCurrentText(c.color)
@@ -891,6 +972,17 @@ class MainWindow(QMainWindow):
         return (f"{i + 1}. {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s  ·  "
                 f"score {c.score:.0f}{tag}\n{reason}")
 
+    def _why_html(self, c) -> str:
+        """Hover text: why this moment was picked and why it starts/ends where it does."""
+        a, b = c.start + c.offset + self.project.offset, c.end + c.offset + self.project.offset
+        why = c.why or c.reasons or ["Added by hand."]
+        timing = c.timing or ["You set the start and end yourself."]
+        li = lambda xs: "".join(f"<li>{x}</li>" for x in xs)
+        return (f"<div style='max-width:420px'><b>Why this moment</b> · score {c.score:.0f}/100"
+                f"<ul style='margin:2px 0 6px -20px'>{li(why)}</ul>"
+                f"<b>Why {fmt_time(a)} – {fmt_time(b)}</b> ({b - a:.0f} s)"
+                f"<ul style='margin:2px 0 0 -20px'>{li(timing)}</ul></div>")
+
     def _cur_offset(self) -> float:
         c = self.current_clip()
         return c.offset if c else 0.0
@@ -910,14 +1002,14 @@ class MainWindow(QMainWindow):
         if not (0 <= r < len(self.project.clips)):
             return
         self.clip_list.item(r).setText(self._item_text(r, self.project.clips[r]))
-        self.timeline.set_clips(self._spans(), r)
+        self.timeline.set_clips(self._spans(), r, [self._why_html(c) for c in self.project.clips])
 
     def add_clip_here(self):
         if not self.project.source:
             return
         t = self._player_pos() + (self._media_offset or 0.0)     # position on the project timeline
         dur = self.info.duration if self.info else t + 30
-        L = self.clip_len.value()
+        L = (self.min_len.value() + self.max_len.value()) / 2
         s = max(0.0, t - L * 0.3)
         c = editor.Clip(source=self.project.source, start=round(s, 1), end=round(min(dur, s + L), 1),
                         title=f"My clip - {fmt_time(t).replace(':', '.')}", reasons=["Added manually"])
@@ -2059,6 +2151,8 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #333844; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; margin: -6px 0; border-radius: 7px; }}
 QScrollArea {{ border: none; }}
+QLabel#toast {{ background: #2a3a1e; color: #e5e7eb; border: 1px solid {ACCENT}; border-radius: 8px; padding: 8px 14px; }}
+QToolTip {{ background: #1f2228; color: #e5e7eb; border: 1px solid #3a404b; padding: 6px; }}
 QFrame#banner {{ background: #1f2a17; border: 1px solid #3d5a26; border-radius: 8px; }}
 QPushButton#more {{ background: #20242b; border: 1px dashed #4b5260; padding: 9px; color: #cbd5e1; }}
 QPushButton#more:hover {{ border-color: {ACCENT}; color: #fff; }}

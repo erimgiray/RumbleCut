@@ -27,6 +27,7 @@ class Timeline(QWidget):
         self.score: np.ndarray | None = None
         self.clips: list[tuple[float, float]] = []
         self.selected = -1
+        self.tips: list[str] = []
         self.playhead = 0.0
 
     def set_data(self, duration, times=None, score=None):
@@ -34,8 +35,9 @@ class Timeline(QWidget):
         self.times, self.score = times, score
         self.update()
 
-    def set_clips(self, clips: list[tuple[float, float]], selected: int = -1):
+    def set_clips(self, clips: list[tuple[float, float]], selected: int = -1, tips: list[str] | None = None):
         self.clips, self.selected = clips, selected
+        self.tips = tips or []
         self.update()
 
     def set_playhead(self, t: float):
@@ -114,4 +116,10 @@ class Timeline(QWidget):
 
     def mouseMoveEvent(self, ev):
         if self.duration:
-            QToolTip.showText(ev.globalPosition().toPoint(), fmt_time(self._t(ev.position().x())), self)
+            t = self._t(ev.position().x())
+            tip = fmt_time(t)
+            for i, (s, e) in enumerate(self.clips):
+                if s <= t <= e and i < len(getattr(self, "tips", [])):
+                    tip = f"<b>#{i + 1}</b> · {self.tips[i]}"
+                    break
+            QToolTip.showText(ev.globalPosition().toPoint(), tip, self)
