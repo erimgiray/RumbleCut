@@ -122,13 +122,32 @@ def ranges_total(ranges: list[tuple[float, float | None]], duration: float | Non
 
 
 # ----------------------------------------------------------------------------- downloading
+def _impersonation() -> dict:
+    """Rumble answers 403 to anything that doesn't look like a real browser, so requests
+    are sent with Chrome's TLS fingerprint (yt-dlp + curl_cffi). Empty if unavailable."""
+    try:
+        import curl_cffi  # noqa: F401
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        return {"impersonate": ImpersonateTarget.from_str("chrome")}
+    except Exception:
+        return {}
+
+
+def impersonation_available() -> bool:
+    return bool(_impersonation())
+
+
 def fetch_info(url: str) -> dict:
     """Metadata only (title, duration, thumbnail) - no download."""
     import yt_dlp
-    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
-                           "noprogress": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return ydl.sanitize_info(info)
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True,
+            **_impersonation()}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return ydl.sanitize_info(info)
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(_friendly_error(str(e))) from e
 
 
 def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None,
@@ -193,6 +212,7 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
         "concurrent_fragment_downloads": 4,
         "windowsfilenames": True,
         "noplaylist": True,
+        **_impersonation(),
     }
     if ranges:
         from yt_dlp.utils import download_range_func
@@ -258,7 +278,14 @@ def _friendly_error(msg: str) -> str:
         return "This stream is still live or hasn't started. Download it once it has finished and the replay is up."
     if "unsupported url" in m:
         return "That link isn't a Rumble video page. Copy the link from the video's page (rumble.com/v…)."
+    if "impersonat" in m and ("not available" in m or "unsupported" in m):
+        return ("Browser impersonation isn't available in this copy of RumbleCut, and Rumble blocks "
+                "downloads without it. Install the latest RumbleCut from Settings → Updates.")
     if "http error 403" in m or "http error 410" in m:
-        return ("Rumble refused the download (403/410). The video may be private or region-locked, "
-                "or the built-in downloader needs updating - rebuild the app to get the latest yt-dlp.")
+        hint = ("" if impersonation_available() else
+                " This copy of RumbleCut can't imitate a browser, which Rumble now requires - "
+                "install the latest RumbleCut from Settings → Updates.")
+        return ("Rumble refused the download (403). The video may be private, members-only or "
+                "region-locked, or Rumble changed something - try Settings → Updates → "
+                "update the Rumble downloader." + hint)
     return msg.replace("ERROR: ", "")

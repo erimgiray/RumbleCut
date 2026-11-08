@@ -21,7 +21,6 @@ Options:
 | Command | Result |
 |---|---|
 | `build_exe.bat onefile` | a single `dist\RumbleCut.exe` (easy to move around, but slower to start) |
-| `build_exe.bat whisper` | also bundles speech recognition, which enables "Hype words" detection (adds roughly 200 MB) |
 | `run_from_source.bat` | runs the app without building it (for development) |
 
 **No Python on the PC you're sending it to?** Push the folder to GitHub. The included workflow (`.github/workflows/build-exe.yml`) builds the .exe on GitHub's Windows machines, and you download it from the run's *Artifacts*.
@@ -77,6 +76,19 @@ Projects can be saved and reopened later (`.rcproj`).
   - The app checks quietly at start-up, and the Settings tab gets a ● when an update is available.
   - **Relaunch RumbleCut** restarts the app; you're offered the chance to save the project first.
 
+**✨ AI titles & captions** (Clip studio): **✨ Write title & caption with AI** on one clip, or **✨ AI titles for all ticked clips**. Each clip's speech is transcribed on your PC (Whisper), then your chosen AI model writes a short title and an on-screen caption.
+
+### AI models: local or cloud (Settings → AI models)
+| Mode | What runs where | Setup |
+|---|---|---|
+| **On this PC** (default) | Everything runs locally: private and free, using your GPU | Install [Ollama](https://ollama.com), then run e.g. `ollama pull llama3.1` (or `qwen2.5:14b`), press ⟳ and pick the model. LM Studio, llama.cpp and other OpenAI-compatible servers work too: choose "OpenAI-compatible" and enter the server address. |
+| **Cloud** | Claude via the Anthropic API | Paste an API key from console.anthropic.com. It's stored encrypted for your Windows account. The default model is `claude-haiku-5-5`. |
+
+Speech-to-text always runs on your PC. The speech model downloads once, on first use, into `%APPDATA%\RumbleCut\models`. **Test AI** checks the setup.
+
+### Rumble 403 errors
+Rumble refuses requests that don't look like a real browser. RumbleCut sends its requests with Chrome's browser fingerprint (yt-dlp with `curl_cffi`), which this needs. If a download still fails with 403, the video may be private, members-only or region-locked. Otherwise, try **Settings → Updates → update the Rumble downloader**.
+
 ### Publishing an app update
 1. Change `__version__` in `rumblecut/__init__.py`, e.g. to `1.2.0`.
 2. Commit and push to `main` on GitHub.
@@ -114,6 +126,7 @@ rumblecut/
   transcribe.py             optional faster-whisper speech-to-text (GPU when available)
   editor.py                 Clip / Project model, effects, aspect ratios, overlays, transitions, batch export
   context_images.py         interfaces for the upcoming Context Images feature
+  ai.py                     one switch for AI: local (Ollama / OpenAI-compatible) or cloud (Claude)
   ffmpeg_tools.py           finds the bundled ffmpeg, runs jobs with progress and cancel, NVENC detection
   config.py                 settings in %APPDATA%\RumbleCut
   updater.py                downloader + app self-update, relaunch

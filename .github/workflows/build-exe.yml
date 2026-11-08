@@ -34,6 +34,12 @@ jobs:
         run: |
           $env:RUMBLECUT_ONEFILE = "1"
           python -m PyInstaller --noconfirm --clean RumbleCut.spec
+      - name: Check every component inside the built exe
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/RumbleCut.exe -ArgumentList "--diagnose","diag.json","--asr" -Wait -PassThru
+          Get-Content diag.json
+          if ($p.ExitCode -ne 0) { throw "Component check failed - see the report above" }
       - uses: actions/upload-artifact@v4
         with:
           name: RumbleCut-windows

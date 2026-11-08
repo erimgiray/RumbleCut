@@ -14,14 +14,30 @@ binaries = [(p, "ffmpeg") for p in ("vendor/ffmpeg/ffmpeg.exe", "vendor/ffmpeg/f
 datas = [("assets", "assets")]
 hidden = collect_submodules("yt_dlp")
 
-try:  # optional speech recognition
+try:  # browser impersonation (Rumble returns 403 without it)
+    from PyInstaller.utils.hooks import collect_all
+    _d, _b, _h = collect_all("curl_cffi")
+    datas += _d
+    binaries += _b
+    hidden += _h
+except Exception:
+    pass
+
+try:  # speech recognition (Whisper) - model files download on first use
     import faster_whisper  # noqa: F401
-    hidden += collect_submodules("faster_whisper") + ["ctranslate2"]
-    datas += collect_data_files("faster_whisper")
+    from PyInstaller.utils.hooks import collect_all
+    for pkg in ("faster_whisper", "ctranslate2", "onnxruntime", "tokenizers", "av"):
+        try:
+            _d, _b, _h = collect_all(pkg)
+            datas += _d
+            binaries += _b
+            hidden += _h
+        except Exception:
+            pass
 except ImportError:
     pass
 
-excludes = ["tkinter", "matplotlib", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+excludes = ["tkinter", "matplotlib", "pkg_resources", "setuptools", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
             "PySide6.QtWebEngineQuick", "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick3D",
             "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtDesigner"]
 

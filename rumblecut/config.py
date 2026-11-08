@@ -20,6 +20,11 @@ DEFAULTS = {
     "export_quality": "high",
     "auto_update_check": True,
     "update_repo": "erimgiray/RumbleCut",
+    "ai_mode": "local",           # "local" (Ollama / LM Studio on this PC) or "cloud" (Claude API)
+    "local_kind": "ollama",
+    "local_url": "",
+    "local_model": "",
+    "cloud_model": "",
 }
 
 

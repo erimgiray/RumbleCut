@@ -13,13 +13,13 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
     QStyle, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__, analysis, config, context_images, downloader, editor
 from .. import ffmpeg_tools as ft
-from .. import transcribe, updater
+from .. import ai, transcribe, updater
 from .timeline import Timeline, fmt_time
 from .workers import Worker
 
@@ -74,7 +74,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_studio_tab(), "②  Clip studio")
         self.tabs.addTab(self._build_export_tab(), "③  Export")
         self.tabs.addTab(self._build_context_tab(), "✨  Context images  (coming soon)")
-        self.settings_index = self.tabs.addTab(self._build_settings_tab(), "⚙  Settings")
+        _sc = QScrollArea()
+        _sc.setWidgetResizable(True)
+        _sc.setWidget(self._build_settings_tab())
+        self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self._build_menu()
         self.setStatusBar(QStatusBar())
@@ -392,6 +395,9 @@ class MainWindow(QMainWindow):
                               ("⧉ Duplicate", "", self.duplicate_clip), ("✖ Remove", "", self.remove_clip)]:
             b = QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn); brow.addWidget(b)
         lv.addLayout(brow)
+        self.btn_ai_all = QPushButton("✨ AI titles for all ticked clips")
+        self.btn_ai_all.clicked.connect(lambda: self.ai_titles("all"))
+        lv.addWidget(self.btn_ai_all)
         split.addWidget(left)
 
         # centre: preview
@@ -461,6 +467,11 @@ class MainWindow(QMainWindow):
         self.i_len = QLabel("")
         self.i_why = QLabel(""); self.i_why.setWordWrap(True); self.i_why.setObjectName("muted")
         fl.addRow("Title", self.i_title)
+        self.btn_ai_title = QPushButton("✨ Write title && caption with AI")
+        self.btn_ai_title.setToolTip("Transcribes this clip and asks your AI model (Settings → AI models) "
+                                     "for a title and on-screen caption")
+        self.btn_ai_title.clicked.connect(lambda: self.ai_titles("current"))
+        fl.addRow("", self.btn_ai_title)
         fl.addRow("Start", self.i_start)
         fl.addRow("End", self.i_end)
         fl.addRow("Length", self.i_len)
@@ -630,7 +641,7 @@ class MainWindow(QMainWindow):
             if words:
                 transcript = transcribe.transcribe(
                     src, model, dur, cancel=cancel,
-                    on_progress=lambda f, m: on_progress(f * 0.5, m))
+                    on_progress=lambda f, m: on_progress(max(f, 0) * 0.5, m))
                 prog = lambda f, m: on_progress(0.5 + f * 0.5, m)
             else:
                 prog = on_progress
@@ -1119,7 +1130,8 @@ class MainWindow(QMainWindow):
             "relevant image onto the clip at exactly that moment - like an editor adding B-roll.<br><br>"
             "<b>How it will work</b><br>"
             "1. <b>Listen</b> - the clip's speech is transcribed with word-level timing (runs on your GPU).<br>"
-            "2. <b>Understand</b> - the key topics and names are pulled out of each sentence.<br>"
+            "2. <b>Understand</b> - the key topics and names are pulled out of each sentence by the AI model "
+            "you choose in Settings → AI models (on this PC or cloud).<br>"
             "3. <b>Find</b> - matching pictures are fetched from the sources you allow (your own image folder, "
             "free-licence libraries, or a search provider with your API key).<br>"
             "4. <b>Place</b> - images are timed to the words, spaced out so they never clutter, and "
@@ -1280,6 +1292,115 @@ class MainWindow(QMainWindow):
         nl.setWordWrap(True)
         gl.addWidget(nl, 9, 0, 1, 3)
         left.addWidget(g)
+        # ---- AI models (local vs cloud)
+        gai = QGroupBox("AI models")
+        av = QVBoxLayout(gai)
+        cfg = ai.settings()
+        self.ai_local = QRadioButton("On this PC: local models (private, free, uses your GPU)")
+        self.ai_cloud = QRadioButton("Cloud: Claude (needs an Anthropic API key)")
+        (self.ai_local if cfg["mode"] == "local" else self.ai_cloud).setChecked(True)
+        av.addWidget(self.ai_local)
+        self.ai_local_box = QWidget()
+        lf = QFormLayout(self.ai_local_box)
+        lf.setContentsMargins(26, 0, 0, 6)
+        self.ai_kind = QComboBox()
+        self.ai_kind.addItems(["Ollama", "OpenAI-compatible (LM Studio, llama.cpp, Jan…)"])
+        self.ai_kind.setCurrentIndex(0 if cfg["local_kind"] == "ollama" else 1)
+        self.ai_url = QLineEdit(cfg["local_url"])
+        self.ai_model = QComboBox()
+        self.ai_model.setEditable(True)
+        self.ai_model.setMinimumWidth(200)
+        if cfg["local_model"]:
+            self.ai_model.addItem(cfg["local_model"])
+        self.ai_model.lineEdit().setPlaceholderText("pick or type a model name")
+        refresh = QToolButton()
+        refresh.setText("⟳")
+        refresh.setToolTip("Reload the list of installed models")
+        refresh.clicked.connect(lambda: self.refresh_local_models(quiet=False))
+        mrow = QHBoxLayout()
+        mrow.addWidget(self.ai_model, 1)
+        mrow.addWidget(refresh)
+        self.ai_local_status = QLabel("")
+        self.ai_local_status.setObjectName("muted")
+        self.ai_local_status.setWordWrap(True)
+        lf.addRow("Server", self.ai_kind)
+        lf.addRow("Address", self.ai_url)
+        lf.addRow("Model", mrow)
+        lf.addRow("", self.ai_local_status)
+        av.addWidget(self.ai_local_box)
+        av.addWidget(self.ai_cloud)
+        self.ai_cloud_box = QWidget()
+        cf = QFormLayout(self.ai_cloud_box)
+        cf.setContentsMargins(26, 0, 0, 6)
+        self.ai_key = QLineEdit()
+        self.ai_key.setEchoMode(QLineEdit.Password)
+        self.ai_key.setPlaceholderText("•••••••• saved (paste a new key to replace)" if ai.get_api_key()
+                                       else "sk-ant-…  (from console.anthropic.com)")
+        self.ai_cloud_model = QLineEdit(cfg["cloud_model"])
+        cf.addRow("API key", self.ai_key)
+        cf.addRow("Model", self.ai_cloud_model)
+        av.addWidget(self.ai_cloud_box)
+        sf = QFormLayout()
+        self.s_whisper = QComboBox()
+        self.s_whisper.addItems(["tiny", "base", "small", "medium", "large-v3"])
+        self.s_whisper.setCurrentText(s.get("whisper_model", "small"))
+        self.s_whisper.currentTextChanged.connect(lambda t: self._save_setting("whisper_model", t))
+        self.s_whisper.setEnabled(transcribe.available())
+        sf.addRow("Speech-to-text", self.s_whisper)
+        sl = QLabel("Speech is always turned into text on this PC (Whisper)." if transcribe.available()
+                    else "Speech-to-text isn't in this copy. Install the latest version from Updates.")
+        sl.setObjectName("muted")
+        sl.setWordWrap(True)
+        sf.addRow("", sl)
+        av.addLayout(sf)
+        trow = QHBoxLayout()
+        self.ai_test_btn = QPushButton("Test AI")
+        self.ai_test_btn.clicked.connect(self.test_ai)
+        self.ai_test_label = QLabel("")
+        self.ai_test_label.setWordWrap(True)
+        trow.addWidget(self.ai_test_btn)
+        trow.addWidget(self.ai_test_label, 1)
+        av.addLayout(trow)
+        hint = QLabel("Used for ✨ AI clip titles & captions now, and for Context Images when it ships.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        av.addWidget(hint)
+        left.addWidget(gai)
+
+        def mode_changed():
+            local = self.ai_local.isChecked()
+            self.ai_local_box.setEnabled(local)
+            self.ai_cloud_box.setEnabled(not local)
+            self._save_setting("ai_mode", "local" if local else "cloud")
+            self.ai_test_label.setText("")
+        self.ai_local.toggled.connect(lambda _: mode_changed())
+        self.ai_local_box.setEnabled(cfg["mode"] == "local")
+        self.ai_cloud_box.setEnabled(cfg["mode"] == "cloud")
+
+        def kind_changed(i):
+            kind = "ollama" if i == 0 else "openai"
+            defaults = {"ollama": "http://localhost:11434", "openai": "http://localhost:1234"}
+            if self.ai_url.text().strip().rstrip("/") in defaults.values():
+                self.ai_url.setText(defaults[kind])
+                self._save_setting("local_url", defaults[kind])
+            self._save_setting("local_kind", kind)
+            self.refresh_local_models(quiet=False)
+        self.ai_kind.currentIndexChanged.connect(kind_changed)
+        self.ai_url.editingFinished.connect(lambda: (self._save_setting("local_url", self.ai_url.text().strip()),
+                                                     self.refresh_local_models(quiet=True)))
+        self.ai_model.currentTextChanged.connect(lambda t: t.strip() and self._save_setting("local_model", t.strip()))
+
+        def key_entered():
+            k = self.ai_key.text().strip()
+            if k:
+                ai.set_api_key(k)
+                self.ai_key.clear()
+                self.ai_key.setPlaceholderText("•••••••• saved (paste a new key to replace)")
+                self.statusBar().showMessage("API key saved (encrypted for your Windows account) ✓", 4000)
+        self.ai_key.editingFinished.connect(key_entered)
+        self.ai_cloud_model.editingFinished.connect(
+            lambda: self._save_setting("cloud_model", self.ai_cloud_model.text().strip() or ai.DEFAULT_CLOUD_MODEL))
+
         left.addStretch()
 
         # ---- folders & performance
@@ -1295,12 +1416,6 @@ class MainWindow(QMainWindow):
         self.s_gpu.setChecked(bool(s.get("use_gpu", True)))
         self.s_gpu.toggled.connect(lambda b: self._save_setting("use_gpu", b))
         fl.addRow("", self.s_gpu)
-        self.s_whisper = QComboBox()
-        self.s_whisper.addItems(["tiny", "base", "small", "medium", "large-v3"])
-        self.s_whisper.setCurrentText(s.get("whisper_model", "small"))
-        self.s_whisper.currentTextChanged.connect(lambda t: self._save_setting("whisper_model", t))
-        self.s_whisper.setEnabled(transcribe.available())
-        fl.addRow("Speech model", self.s_whisper)
         right.addWidget(g2)
 
         g3 = QGroupBox("About this copy")
@@ -1358,6 +1473,8 @@ class MainWindow(QMainWindow):
         if self._about_loaded:
             return
         self._about_loaded = True
+        if self.ai_local.isChecked():
+            self.refresh_local_models(quiet=True)
 
         def job(on_progress=None, cancel=None):
             try:
@@ -1370,6 +1487,105 @@ class MainWindow(QMainWindow):
         w = Worker(job)
         w.background = True
         w.done.connect(lambda r: (self.a_ffmpeg.setText(r[0]), self.a_gpu.setText(r[1])))
+        self._start(w)
+
+    # ---- AI models
+    def refresh_local_models(self, quiet: bool = True):
+        if not hasattr(self, "ai_model"):
+            return
+        kind = "ollama" if self.ai_kind.currentIndex() == 0 else "openai"
+        url = self.ai_url.text().strip()
+        self.ai_local_status.setText("Looking for models…")
+        w = Worker(lambda on_progress=None, cancel=None: ai.list_local_models(kind, url))
+        w.background = True
+
+        def done(models):
+            cur = self.ai_model.currentText().strip()
+            self.ai_model.blockSignals(True)
+            self.ai_model.clear()
+            self.ai_model.addItems(models)
+            if cur:
+                self.ai_model.setCurrentText(cur)
+            elif models:
+                self.ai_model.setCurrentIndex(0)
+            self.ai_model.blockSignals(False)
+            if self.ai_model.currentText().strip():
+                self._save_setting("local_model", self.ai_model.currentText().strip())
+            self.ai_local_status.setText(f"<span style='color:{ACCENT}'>✔ Connected</span> · {len(models)} model(s) "
+                                         "installed" if models else
+                                         "Connected, but no models are installed yet. "
+                                         "In a terminal run e.g.  ollama pull llama3.1")
+        w.done.connect(done)
+        w.failed.connect(lambda m: self.ai_local_status.setText(
+            m if not quiet else "Not connected. Start Ollama (or your local server), then press ⟳."))
+        self._start(w)
+
+    def test_ai(self):
+        self.ai_test_btn.setEnabled(False)
+        self.ai_test_label.setText("Asking the model…")
+        w = Worker(lambda on_progress=None, cancel=None: ai.test())
+        w.done.connect(self.ai_test_label.setText)
+        w.failed.connect(lambda m: self.ai_test_label.setText(f"<span style='color:#f87171'>{m}</span>"))
+        w.finished.connect(lambda: self.ai_test_btn.setEnabled(True))
+        self._start(w)
+
+    def ai_titles(self, which: str = "current"):
+        if which == "current":
+            c = self.current_clip()
+            targets = [c] if c else []
+        else:
+            targets = [c for c in self.project.clips if c.enabled]
+        if not targets:
+            return
+        if not transcribe.available():
+            QMessageBox.information(self, "AI titles", "Speech-to-text isn't included in this copy of RumbleCut. "
+                                    "Install the latest version from Settings → Updates.")
+            return
+        src, stream_title = self.project.source, self.project.title
+
+        def job(on_progress=None, cancel=None):
+            results = []
+            for i, c in enumerate(targets):
+                if cancel():
+                    break
+                base = i / len(targets)
+                step = lambda f, m, i=i: on_progress(base + max(f, 0) / len(targets) * 0.8,
+                                                     f"Clip {i + 1}/{len(targets)}: {m}")
+                try:
+                    segs = transcribe.transcribe(src, start=c.start, end=c.end, cancel=cancel, on_progress=step)
+                    text = " ".join(t for _, _, t in segs)
+                    step(1.0, "writing title…")
+                    results.append((c, ai.suggest_title(text, stream_title), None))
+                except ft.Cancelled:
+                    raise
+                except Exception as e:
+                    results.append((c, None, str(e)))
+            return results
+
+        btns = [self.btn_ai_title, self.btn_ai_all]
+        for b in btns:
+            b.setEnabled(False)
+        w = Worker(job)
+        w.progress.connect(lambda f, m: (self.an_progress.setValue(int(max(f, 0) * 1000)), self.an_status.setText(m)))
+
+        def done(results):
+            errs = []
+            for c, res, err in results:
+                if res:
+                    c.title = res["title"]
+                    if res.get("caption") and not c.caption.strip():
+                        c.caption = res["caption"]
+                else:
+                    errs.append(err)
+            ok = sum(1 for _, r, _ in results if r)
+            self._fill_clip_list(keep_row=True)
+            self.select_clip(self.clip_list.currentRow())
+            self.an_status.setText(f"✨ AI wrote {ok} title(s) with {ai.describe()}")
+            if errs:
+                QMessageBox.warning(self, "AI titles", f"{len(errs)} clip(s) failed:\n\n" + "\n".join(dict.fromkeys(errs)))
+        w.done.connect(done)
+        w.failed.connect(lambda m: QMessageBox.warning(self, "AI titles", m))
+        w.finished.connect(lambda: [b.setEnabled(True) for b in btns])
         self._start(w)
 
     # ---- update actions
@@ -1596,6 +1812,9 @@ QScrollArea {{ border: none; }}
 QCheckBox::indicator, QListWidget::indicator {{ width: 15px; height: 15px; border: 1px solid #4b5260;
     border-radius: 4px; background: #121418; }}
 QCheckBox::indicator:checked, QListWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QRadioButton::indicator {{ width: 14px; height: 14px; border: 2px solid #4b5260; border-radius: 9px; background: #121418; }}
+QRadioButton::indicator:checked {{ border: 4px solid {ACCENT}; background: #0b0d10; }}
+QRadioButton:disabled, QLabel:disabled {{ color: #5b6370; }}
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
     width: 16px; background: #2a2e36; border: none; }}
 QSplitter::handle {{ background: #2a2e36; width: 2px; }}
