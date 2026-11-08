@@ -79,7 +79,9 @@ def _chunk_features(x: np.ndarray, hops: int) -> tuple:
     with np.errstate(invalid="ignore", divide="ignore"):
         lag = lag + np.where(np.abs(denom) > 1e-6, 0.5 * (a - c) / denom, 0.0)
     f0 = SR / np.maximum(lag, 1)
-    loud_floor = max(-50.0, float(np.percentile(edb, 30)) + 6)
+    # "someone is talking" threshold: above the quiet parts, but never so high that continuous
+    # speech (no pauses, music underneath) or a steady voice falls below it
+    loud_floor = max(-50.0, min(float(np.percentile(edb, 30)) + 6, float(np.percentile(edb, 90)) - 15))
     voiced_fr = (rmax > 0.45) & (edb > loud_floor)
 
     per = int(round(HOP * SR / STEP))                              # 25 frames per hop
