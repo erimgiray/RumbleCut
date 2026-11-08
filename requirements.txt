@@ -1,0 +1,6 @@
+PySide6-Essentials>=6.7
+PySide6-Addons>=6.7
+numpy>=1.26
+yt-dlp>=2025.1.1
+# Optional - enables "Hype words" detection now and the Context Images feature later:
+# faster-whisper>=1.0

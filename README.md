@@ -1,2 +1,147 @@
 # RumbleCut
-Windows app: download Rumble streams, auto-find highlights, export polished clips
+
+A Windows desktop app that **downloads long Rumble videos and livestream replays, finds the most interesting moments by itself, and exports them as short, polished clips**. You can export them one by one, as vertical Shorts, or as a "best moments" compilation with transitions.
+
+---
+
+## Build the .exe (one time, about 5 minutes)
+
+1. Install **Python 3.10+** from python.org. Tick **"Add python.exe to PATH"** during setup.
+2. Unzip this folder anywhere, e.g. `C:\Users\Erim\Documents\RumbleCut`.
+3. Double-click **`build_exe.bat`**.
+
+The script creates a private Python environment, installs the libraries, downloads FFmpeg (the build includes NVIDIA GPU encoding), and builds the app. When it's done, Explorer opens on:
+
+```
+dist\RumbleCut\RumbleCut.exe      ← run this (keep the RumbleCut folder together)
+```
+
+Options:
+
+| Command | Result |
+|---|---|
+| `build_exe.bat onefile` | a single `dist\RumbleCut.exe` (easy to move around, but slower to start) |
+| `build_exe.bat whisper` | also bundles speech recognition, which enables "Hype words" detection (adds roughly 200 MB) |
+| `run_from_source.bat` | runs the app without building it (for development) |
+
+**No Python on the PC you're sending it to?** Push the folder to GitHub. The included workflow (`.github/workflows/build-exe.yml`) builds the .exe on GitHub's Windows machines, and you download it from the run's *Artifacts*.
+
+> Rumble changes its site from time to time. If downloads start failing, run `build_exe.bat` again. It pulls the latest **yt-dlp** downloader.
+
+---
+
+## Using it
+
+**① Get video:** paste a `rumble.com/...` link, pick a quality, and click **Download**. Large streams resume if interrupted. You can also open any video already on your PC.
+- **Only download part of the video:** tick the box and type the ranges you want, e.g. `1:05:00-1:20:00, 2:10:30-2:16:00`.
+  - Times can be `h:mm:ss`, `mm:ss`, plain seconds, or `1h5m`.
+  - Leave the end blank (`2:30:00-`) to mean "to the end".
+  - Overlapping ranges are merged.
+  - Each range is saved as its own file, and only those bytes are fetched.
+  - Press **Check link** first to see the video's length and how much you're skipping.
+
+  Clip titles and `clips.csv` still show times in the **original stream**, so you can find each moment again.
+
+**② Clip studio**
+- **Find highlights** scans the whole stream and draws an *excitement timeline*. The best moments become clips, ranked best first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'").
+- Click a clip to preview it. Use **[ Set start / Set end ]** (keys `I` / `O`) to trim, drag clips to reorder them, and untick the ones you don't want.
+- **Effects per clip:**
+  - speed (0.5× to 2×)
+  - punch-in zoom
+  - colour looks (Vivid, B&W, Warm, Cool, Cinematic, Retro)
+  - vignette
+  - fade in/out
+  - loudness levelling
+  - captions (top or bottom)
+  - the transition into the clip
+  - **images on screen**, timed to the clip, with fades and a border
+- **Preview with effects** renders a quick low-res version so you can check the look before exporting.
+
+**③ Export**
+- **Shapes:** Original, 16:9, **9:16 vertical** (crop or blurred background), and 1:1.
+- **Settings:** 480p to 4K, 24 to 60 fps, quality, and an optional watermark such as `@yourchannel`.
+- **Exports:** each clip as its own MP4 (plus a thumbnail), and/or a **compilation** joined with 16 transitions (cross-fade, fade through black, wipes, slides, circle, radial, zoom, pixelate, blur, random mix and more).
+- A `clips.csv` lists each clip's timestamps in the original stream and why it was picked.
+
+Encoding uses the **NVIDIA GPU (NVENC)** automatically when one is present. You can turn this off in *File → Settings*.
+
+Projects can be saved and reopened later (`.rcproj`).
+
+**✨ Context images:** coming soon (see below).
+
+**⚙ Settings**
+- Folders, GPU encoding and the speech model. Changes save automatically.
+- **Updates:**
+  - **Rumble downloader:** a one-click update when Rumble changes its site, with no rebuild needed. It's installed into `%APPDATA%\RumbleCut\updates` and used from the next launch. *Undo downloader update* goes back to the downloader that came with the app.
+  - **RumbleCut app:** downloads the newest `RumbleCut.exe` from your GitHub Releases, swaps it in and relaunches. This needs the single-file build, which you get from `build_onefile.bat`.
+  - The app checks quietly at start-up, and the Settings tab gets a ● when an update is available.
+  - **Relaunch RumbleCut** restarts the app; you're offered the chance to save the project first.
+
+### Publishing an app update
+1. Change `__version__` in `rumblecut/__init__.py`, e.g. to `1.2.0`.
+2. Commit and push to GitHub, then tag the release:
+   ```
+   git tag v1.2.0
+   git push origin v1.2.0
+   ```
+3. The workflow builds `RumbleCut.exe` and publishes it as a Release. Every copy of the app then sees the update under Settings → Check for updates.
+
+The repository the app checks can be changed in Settings. It's `erimgiray/RumbleCut` by default.
+
+---
+
+## How highlight detection works
+
+Everything runs locally, with no AI service or internet needed:
+
+| Signal | What it catches |
+|---|---|
+| **Excitement:** loudness compared with the *local* 2-minute baseline | shouting, laughing, crowd noise. Because it's relative, quiet streams still produce highlights. |
+| **Rise:** sudden jumps in loudness | reactions, the instant something happens |
+| **Sustained energy** | longer heated stretches |
+| **Scene changes** (optional) | bursts of on-screen action, camera cuts |
+| **Hype words** (optional, needs `faster-whisper`) | "no way", "let's go", "oh my god", "clip that"… |
+
+The signals are combined into a score. The top peaks are picked with a minimum gap between clips, and each clip is built mostly from the *build-up* to the peak. The start and end then snap to the nearest pause, so clips don't cut mid-sentence.
+
+---
+
+## Architecture
+
+```
+app.py                      entry point → RumbleCut.exe
+rumblecut/
+  downloader.py             yt-dlp wrapper: Rumble videos and stream replays, progress, resume, friendly errors
+  analysis.py               highlight detection (streams audio in chunks, so 4 h+ files use little memory)
+  transcribe.py             optional faster-whisper speech-to-text (GPU when available)
+  editor.py                 Clip / Project model, effects, aspect ratios, overlays, transitions, batch export
+  context_images.py         interfaces for the upcoming Context Images feature
+  ffmpeg_tools.py           finds the bundled ffmpeg, runs jobs with progress and cancel, NVENC detection
+  config.py                 settings in %APPDATA%\RumbleCut
+  updater.py                downloader + app self-update, relaunch
+  ui/main_window.py         PySide6 interface (4 tabs), dark theme
+  ui/timeline.py            excitement timeline widget
+  ui/workers.py             background threads, so the UI never freezes
+tests/test_engine.py        end-to-end check on a synthetic stream:  python -m tests.test_engine
+```
+
+## Coming feature: Context Images
+
+The goal is to automatically show a relevant picture whenever the streamer talks about something (a person, a place, a headline or a product), the way a video editor adds B-roll.
+
+```
+clip audio → transcribe (word timings) → TopicExtractor → ImageProvider(s) → ContextImagePlanner → ImageOverlay → export
+```
+
+- **Already done:**
+  - the rendering side (`ImageOverlay`: timed, positioned, faded, bordered). You can use it by hand today with *＋ Image at playhead*.
+  - the plug-in interfaces in `context_images.py`, with a working offline topic extractor and a "my image folder" provider.
+- **Still to do:**
+  - an online provider (Wikimedia Commons / Pexels / search API)
+  - an LLM topic extractor, for better topics than the keyword heuristic
+  - the tab's settings UI
+  - a review step where suggestions appear in each clip's image list before export
+
+---
+
+Only download and re-upload videos you own or have permission to use.

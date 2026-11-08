@@ -1,0 +1,46 @@
+# Builds RumbleCut.exe on GitHub's Windows machines.
+#  - Every push to main: builds and attaches the .exe to the run (Actions tab -> run -> Artifacts).
+#  - Pushing a version tag (e.g. v1.2.0): also publishes a GitHub Release with RumbleCut.exe,
+#    which is what the app's Settings -> "Check for updates" downloads.
+name: Build RumbleCut.exe
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install libraries
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Get FFmpeg
+        shell: pwsh
+        run: ./tools/get_ffmpeg.ps1
+      - name: Smoke test engine
+        run: python -m tests.test_engine
+      - name: Build single-file exe
+        shell: pwsh
+        run: |
+          $env:RUMBLECUT_ONEFILE = "1"
+          python -m PyInstaller --noconfirm --clean RumbleCut.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RumbleCut-windows
+          path: dist/RumbleCut.exe
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RumbleCut.exe
+          generate_release_notes: true
