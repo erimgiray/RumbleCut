@@ -773,7 +773,7 @@ class MainWindow(QMainWindow):
                                 "Long heated stretches are trimmed around their peak.")
         self.min_len.valueChanged.connect(lambda x: self.max_len.value() < x and self.max_len.setValue(x))
         self.max_len.valueChanged.connect(lambda x: self.min_len.value() > x and self.min_len.setValue(x))
-        self.min_gap = PresetBox([10, 20, 30], fmt_secs, parse_secs, lo=0, hi=1800)
+        self.min_gap = PresetBox([0, 10, 20, 30], fmt_secs, parse_secs, lo=0, hi=1800)
         self.min_gap.setValue(int(s["min_gap"]))
         for b, wdt in ((self.n_clips, 64), (self.min_len, 118), (self.max_len, 118), (self.min_gap, 118)):
             b.setMinimumWidth(wdt)
