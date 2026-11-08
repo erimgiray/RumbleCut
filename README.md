@@ -76,6 +76,7 @@ The **Only download part of the video** box and its times are remembered between
   2. It starts a few seconds earlier, so viewers get the build-up, and ends 2 s after the energy settles.
   3. It's kept between your **Min length** and **Max length**. Short moments get extra lead-in; long ones are trimmed around their peak.
   4. Both ends are moved to natural pauses (or scene cuts), so nobody is cut off mid-word.
+- **Zoom the timeline:** scroll up on it to zoom in (around the mouse), down to zoom out, or use the **＋ / － / Fit** buttons beside it. Shift+scroll moves left and right while zoomed; a green bar along the top shows which part you're looking at, and the view follows the playhead and the moment you select.
 - **Scrubber:** the bar under the player shows where you are; drag it (or drag across the main timeline) to move anywhere. Blue parts have video; the rest is audio only. Where there's nothing to show (an audio-only part, or nothing loaded), the player shows an icon and a note explaining why, and you get a notice when you scrub out of a part with video.
 - **The moment's own timeline:** click a moment and a zoomed timeline for it slides open under the main one. Drag its handles to set the exact start and end (in 0.1 s steps), drag the middle to move the whole moment, or click outside it to jump there. You hear the edge as you drag it.
 - **Start / End** in the Clip panel show and accept stream times (`2:14:05.5`).

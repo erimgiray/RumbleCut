@@ -858,7 +858,41 @@ class MainWindow(QMainWindow):
         self.timeline = Timeline()
         self.timeline.seek.connect(self.scrub_to)
         self.timeline.clip_clicked.connect(lambda i: self.clip_list.setCurrentRow(i))
-        v.addWidget(self.timeline)
+        self.timeline.setToolTip("")
+        trow = QHBoxLayout()
+        trow.setSpacing(4)
+        trow.addWidget(self.timeline, 1)
+        zcol = QVBoxLayout()
+        zcol.setSpacing(3)
+        self.btn_zoom_in = QToolButton(); self.btn_zoom_in.setText("＋")
+        self.btn_zoom_in.setToolTip("Zoom in (or scroll up on the timeline)")
+        self.btn_zoom_in.clicked.connect(lambda: self.timeline.zoom_by(2.0))
+        self.btn_zoom_out = QToolButton(); self.btn_zoom_out.setText("－")
+        self.btn_zoom_out.setToolTip("Zoom out (or scroll down on the timeline)")
+        self.btn_zoom_out.clicked.connect(lambda: self.timeline.zoom_by(0.5))
+        self.btn_zoom_fit = QToolButton(); self.btn_zoom_fit.setText("Fit")
+        self.btn_zoom_fit.setToolTip("Show the whole stream again · Shift+scroll moves left and right when zoomed in")
+        self.btn_zoom_fit.clicked.connect(self.timeline.zoom_fit)
+        for b in (self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_fit):
+            b.setObjectName("zoomBtn")
+            b.setFixedSize(40, 28)
+            zcol.addWidget(b)
+        self.zoom_lbl = QLabel("1×")
+        self.zoom_lbl.setObjectName("muted")
+        self.zoom_lbl.setAlignment(Qt.AlignCenter)
+        zcol.addWidget(self.zoom_lbl)
+        zcol.addStretch()
+        trow.addLayout(zcol)
+        v.addLayout(trow)
+
+        def zoom_changed(z):
+            self.zoom_lbl.setText(f"{z:.0f}×" if z >= 10 else f"{z:.1f}×".replace(".0×", "×"))
+            self.btn_zoom_out.setEnabled(z > 1.001)
+            self.btn_zoom_fit.setEnabled(z > 1.001)
+            self.btn_zoom_in.setEnabled(self.timeline.duration > 0 and
+                                        self.timeline.view[1] - self.timeline.view[0] > self.timeline.MAX_ZOOM_SPAN + 0.01)
+        self.timeline.zoom_changed.connect(zoom_changed)
+        zoom_changed(1.0)
 
         # the selected moment's own timeline - slides open under the main one
         self.clip_tl_box = QFrame()
@@ -1018,6 +1052,8 @@ class MainWindow(QMainWindow):
         self.btn_preview.setToolTip("Quick low-res render of the selected clip with all effects applied")
         self.btn_preview.clicked.connect(self.render_preview)
         self.vol = QSlider(Qt.Horizontal); self.vol.setRange(0, 100); self.vol.setValue(80); self.vol.setMaximumWidth(90)
+        self.vol_lbl = QLabel("80%"); self.vol_lbl.setMinimumWidth(38)
+        self.vol.valueChanged.connect(lambda x: self.vol_lbl.setText(f"{x}%"))
         if self.player and self.audio:
             self.audio.setVolume(0.8)
             self.vol.valueChanged.connect(lambda x: self.audio.setVolume(x / 100))
@@ -1025,7 +1061,7 @@ class MainWindow(QMainWindow):
         for wdg in [self.btn_play, back, fwd, self.pos_label]:
             tr.addWidget(wdg)
         tr.addStretch()
-        tr.addWidget(QLabel("🔊")); tr.addWidget(self.vol)
+        tr.addWidget(QLabel("🔊")); tr.addWidget(self.vol); tr.addWidget(self.vol_lbl)
         mv.addLayout(tr)
         tr2 = QHBoxLayout()
         for wdg in [self.btn_play_clip, self.btn_set_in, self.btn_set_out]:
@@ -1510,6 +1546,11 @@ class MainWindow(QMainWindow):
         self.i_trans.setCurrentText(c.transition)
         self._fill_overlays()
         self._loading_inspector = False
+        tl, a, b = self.timeline, c.start + c.offset, c.end + c.offset
+        if tl.zoom > 1.001 and not (tl.view[0] <= a and b <= tl.view[1]):   # zoomed in: bring the moment into view
+            span = max(tl.view[1] - tl.view[0], (b - a) * 1.4)
+            mid = (a + b) / 2
+            tl.set_view(mid - span / 2, mid + span / 2)
         self.seek_clip(c, c.start)
 
     def _set(self, attr, value):
@@ -3067,6 +3108,8 @@ QFrame#banner QLabel, QFrame#banner QCheckBox {{ background: transparent; }}
 QToolButton#hamburgerBtn {{ padding: 0; border: none; background: transparent; }}
 QToolButton#hamburgerBtn:hover {{ background: #2a2e36; border-radius: 6px; }}
 QToolButton#hamburgerBtn::menu-indicator {{ image: none; width: 0; }}
+QToolButton#zoomBtn {{ padding: 0; font-size: 11pt; }}
+QToolButton#zoomBtn:disabled {{ color: #4b5260; background: #20232a; }}
 QPushButton#more {{ background: #20242b; border: 1px dashed #4b5260; padding: 9px; color: #cbd5e1; }}
 QPushButton#more:hover {{ border-color: {ACCENT}; color: #fff; }}
 QCheckBox::indicator, QListWidget::indicator {{ width: 15px; height: 15px; border: 1px solid #4b5260;

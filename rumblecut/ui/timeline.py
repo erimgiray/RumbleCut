@@ -18,6 +18,9 @@ def fmt_time(t: float) -> str:
 class Timeline(QWidget):
     seek = Signal(float)
     clip_clicked = Signal(int)
+    zoom_changed = Signal(float)        # how far zoomed in (1 = whole stream)
+
+    MAX_ZOOM_SPAN = 10.0                # seconds: the closest you can zoom
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,11 +38,61 @@ class Timeline(QWidget):
         self.user: list[bool] = []          # which clips are your picks
         self.sections: list[tuple[float, float, float, str]] = []   # AI summary: start, end, interest, text
         self._dragging = False
+        self.view = (0.0, 0.0)              # visible stretch (start, end); (0, duration) = zoomed out
 
     def set_data(self, duration, times=None, score=None):
-        self.duration = float(duration or 0)
+        new = float(duration or 0)
+        if abs(new - self.duration) > 0.01 or self.view[1] <= self.view[0]:
+            self.view = (0.0, new)
+        self.duration = new
         self.times, self.score = times, score
         self.update()
+        self.zoom_changed.emit(self.zoom)
+
+    # ---- zoom
+    @property
+    def zoom(self) -> float:
+        span = self.view[1] - self.view[0]
+        return self.duration / span if span > 0 and self.duration else 1.0
+
+    def set_view(self, a: float, b: float):
+        if not self.duration:
+            return
+        span = max(min(self.MAX_ZOOM_SPAN, self.duration), min(self.duration, b - a))
+        a = max(0.0, min(a, self.duration - span))
+        self.view = (a, a + span)
+        self.update()
+        self.zoom_changed.emit(self.zoom)
+
+    def zoom_by(self, factor: float, around: float | None = None):
+        """factor > 1 zooms in. `around` (seconds) stays under the same spot."""
+        if not self.duration:
+            return
+        a, b = self.view
+        c = self.playhead if around is None else around
+        if not (a <= c <= b):
+            c = (a + b) / 2
+        frac = (c - a) / max(1e-9, b - a)
+        span = (b - a) / factor
+        self.set_view(c - frac * span, c - frac * span + span)
+
+    def zoom_fit(self):
+        self.set_view(0.0, self.duration)
+
+    def pan_by(self, seconds: float):
+        a, b = self.view
+        self.set_view(a + seconds, b + seconds)
+
+    def wheelEvent(self, ev):
+        if not self.duration:
+            return
+        d = ev.angleDelta()
+        if ev.modifiers() & Qt.ShiftModifier or abs(d.x()) > abs(d.y()):     # Shift+wheel / sideways: pan
+            step = (d.x() if abs(d.x()) > abs(d.y()) else d.y()) / 120
+            self.pan_by(-step * (self.view[1] - self.view[0]) * 0.15)
+        elif d.y():
+            self.zoom_by(1.25 ** (d.y() / 120), self._t(ev.position().x()))   # up = in, down = out
+        ev.accept()
 
     def set_clips(self, clips: list[tuple[float, float]], selected: int = -1, tips: list[str] | None = None,
                   user: list[bool] | None = None):
@@ -55,13 +108,19 @@ class Timeline(QWidget):
 
     def set_playhead(self, t: float):
         self.playhead = t
+        a, b = self.view
+        if self.zoom > 1.001 and not self._dragging and not (a <= t <= b):   # keep the playhead in view
+            span = b - a
+            self.set_view(t - span * 0.1, t + span * 0.9)
         self.update()
 
     def _x(self, t: float) -> float:
-        return 8 + (self.width() - 16) * (t / self.duration if self.duration else 0)
+        a, b = self.view
+        return 8 + (self.width() - 16) * ((t - a) / (b - a) if b > a else 0)
 
     def _t(self, x: float) -> float:
-        return max(0.0, min(self.duration, (x - 8) / max(1, self.width() - 16) * self.duration))
+        a, b = self.view
+        return max(0.0, min(self.duration, a + (x - 8) / max(1, self.width() - 16) * (b - a)))
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -76,15 +135,19 @@ class Timeline(QWidget):
             return
         # grid + time labels
         p.setFont(QFont(self.font().family(), 8))
+        va, vb = self.view
+        p.save()
+        p.setClipRect(QRectF(0, 0, self.width(), r.height()))
         steps = 10
         for i in range(steps + 1):
-            x = self._x(self.duration * i / steps)
+            tt = va + (vb - va) * i / steps
+            x = self._x(tt)
             p.setPen(QPen(QColor("#262a31"), 1))
             p.drawLine(QPointF(x, top), QPointF(x, bottom))
             p.setPen(QColor("#7c8591"))
             lx = min(max(x - 30, 0), self.width() - 60)
             align = Qt.AlignLeft if i == 0 else (Qt.AlignRight if i == steps else Qt.AlignCenter)
-            p.drawText(QRectF(lx, bottom + 2, 60, 14), align, fmt_time(self.time_fn(self.duration * i / steps)))
+            p.drawText(QRectF(lx, bottom + 2, 60, 14), align, fmt_time(self.time_fn(tt)))
         # joins between separately downloaded parts
         for jt in self.joins:
             x = self._x(jt)
@@ -111,17 +174,24 @@ class Timeline(QWidget):
             p.setPen(QColor("#e5e7eb"))
             star = "★" if (i < len(self.user) and self.user[i]) else ""
             p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{star}{i + 1}")
-        # score curve
-        if self.score is not None and len(self.score) > 1:
+        # score curve (just the visible stretch)
+        sc = self.score
+        xa, xb = 8.0, self.width() - 8.0
+        if sc is not None and len(sc) > 1 and self.times is not None and len(self.times) == len(sc):
+            i0 = max(0, int(np.searchsorted(self.times, va)) - 1)
+            i1 = min(len(sc), int(np.searchsorted(self.times, vb)) + 2)
+            xa, xb = self._x(float(self.times[i0])), self._x(float(self.times[i1 - 1]))
+            sc = sc[i0:i1]
+        if sc is not None and len(sc) > 1:
             w = max(2, self.width() - 16)
-            idx = np.linspace(0, len(self.score) - 1, w).astype(int)
+            idx = np.linspace(0, len(sc) - 1, w).astype(int)
             # max-pool so short spikes stay visible when zoomed out
-            bins = np.array_split(self.score, w) if len(self.score) > w else None
-            vals = np.array([b.max() if len(b) else 0 for b in bins]) if bins else self.score[idx]
-            path = QPainterPath(QPointF(8, bottom))
+            bins = np.array_split(sc, w) if len(sc) > w else None
+            vals = np.array([b.max() if len(b) else 0 for b in bins]) if bins else sc[idx]
+            path = QPainterPath(QPointF(xa, bottom))
             for j, v in enumerate(vals):
-                path.lineTo(QPointF(8 + j * (self.width() - 16) / (len(vals) - 1), bottom - v * h))
-            path.lineTo(QPointF(self.width() - 8, bottom))
+                path.lineTo(QPointF(xa + j * (xb - xa) / (len(vals) - 1), bottom - v * h))
+            path.lineTo(QPointF(xb, bottom))
             grad = QLinearGradient(0, top, 0, bottom)
             grad.setColorAt(0, QColor(255, 120, 60, 200))
             grad.setColorAt(0.5, QColor(133, 199, 66, 150))
@@ -129,8 +199,17 @@ class Timeline(QWidget):
             p.fillPath(path, grad)
         # playhead
         x = self._x(self.playhead)
-        p.setPen(QPen(QColor("#ffffff"), 2))
-        p.drawLine(QPointF(x, top - 4), QPointF(x, bottom))
+        if va <= self.playhead <= vb:
+            p.setPen(QPen(QColor("#ffffff"), 2))
+            p.drawLine(QPointF(x, top - 4), QPointF(x, bottom))
+        p.restore()
+        # when zoomed in: a mini-map along the very top showing which part you're looking at
+        if self.zoom > 1.001:
+            full = self.width() - 16
+            x0 = 8 + full * va / self.duration
+            x1 = 8 + full * vb / self.duration
+            p.fillRect(QRectF(8, 0, full, 3), QColor("#262a31"))
+            p.fillRect(QRectF(x0, 0, max(3, x1 - x0), 3), QColor(ACCENT))
 
     def mousePressEvent(self, ev):
         if not self.duration or ev.button() != Qt.LeftButton:
