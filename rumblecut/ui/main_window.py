@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__, analysis, config, context_images, downloader, editor
 from .. import ffmpeg_tools as ft
-from .. import ai, diction, transcribe, updater
+from .. import ai, diction, gpu_pack, transcribe, updater
 from .timeline import Timeline, fmt_time
 from .workers import Worker
 
@@ -1012,8 +1012,14 @@ class MainWindow(QMainWindow):
         self._judged_with = ("voice & energy" if words == "voice" else
                              f"voice + what's said ({ai.describe() if use_ai else 'built-in word list'})")
 
+        first_call = {"done": False}
+
         def transcriber(path, a, b, cancel=None, on_progress=None):
-            return transcribe.transcribe(path, start=a, end=b, cancel=cancel, on_progress=on_progress)
+            segs = transcribe.transcribe(path, start=a, end=b, cancel=cancel, on_progress=on_progress)
+            if not first_call["done"] and holder and transcribe.device_note:
+                first_call["done"] = True
+                holder[0].log.emit(f"🎙 Speech-to-text is running on the {transcribe.device_note}")
+            return segs
 
         holder: list = []
 
@@ -1953,7 +1959,19 @@ class MainWindow(QMainWindow):
         sl.setObjectName("muted")
         sl.setWordWrap(True)
         sf.addRow("", sl)
+        grow2 = QHBoxLayout()
+        self.gpu_lbl = QLabel("")
+        self.gpu_lbl.setWordWrap(True)
+        self.gpu_btn = QPushButton("")
+        self.gpu_btn.clicked.connect(self.toggle_gpu_pack)
+        self.gpu_bar = QProgressBar(); self.gpu_bar.setRange(0, 1000); self.gpu_bar.setTextVisible(False)
+        self.gpu_bar.setMaximumHeight(10); self.gpu_bar.hide()
+        grow2.addWidget(self.gpu_lbl, 1)
+        grow2.addWidget(self.gpu_btn)
+        sf.addRow("GPU speed-up", grow2)
+        sf.addRow("", self.gpu_bar)
         av.addLayout(sf)
+        QTimer.singleShot(0, self._update_gpu_row)
         trow = QHBoxLayout()
         self.ai_test_btn = QPushButton("Test AI")
         self.ai_test_btn.clicked.connect(self.test_ai)
@@ -2089,6 +2107,73 @@ class MainWindow(QMainWindow):
         w = Worker(job)
         w.background = True
         w.done.connect(lambda r: (self.a_ffmpeg.setText(r[0]), self.a_gpu.setText(r[1])))
+        self._start(w)
+
+    # ---- GPU speed-up for speech-to-text
+    def _update_gpu_row(self):
+        if not transcribe.available():
+            self.gpu_lbl.setText("Not available in this copy.")
+            self.gpu_btn.hide()
+            return
+        if gpu_pack.installed():
+            self.gpu_lbl.setText(f"<span style='color:{ACCENT}'>✔ Installed</span> - speech-to-text runs on your "
+                                 f"NVIDIA GPU (cuBLAS {gpu_pack.version() or ''}).")
+            self.gpu_btn.setText("Remove")
+            self.gpu_btn.setObjectName("")
+        elif gpu_pack.nvidia_gpu_present():
+            self.gpu_lbl.setText("Your NVIDIA GPU can transcribe speech ~10-20× faster than the CPU. It needs "
+                                 "NVIDIA's free cuBLAS libraries - a one-time 550 MB download (about 800 MB on disk).")
+            self.gpu_btn.setText("⚡ Install GPU speed-up")
+            self.gpu_btn.setObjectName("primary")
+        else:
+            self.gpu_lbl.setText("No NVIDIA GPU found - speech-to-text runs on the CPU.")
+            self.gpu_btn.hide()
+        self.gpu_btn.style().unpolish(self.gpu_btn)
+        self.gpu_btn.style().polish(self.gpu_btn)
+
+    def toggle_gpu_pack(self):
+        if gpu_pack.installed():
+            if QMessageBox.question(self, "GPU speed-up", "Remove the NVIDIA libraries (550 MB)? "
+                                    "Speech-to-text will run on the CPU.") == QMessageBox.Yes:
+                gpu_pack.remove()
+                transcribe.reset()
+                self._update_gpu_row()
+            return
+
+        def job(on_progress=None, cancel=None):
+            ver = gpu_pack.install(on_progress, cancel)
+            transcribe.reset()
+            on_progress(-1.0, "Testing the GPU with a short transcription…")
+            import numpy as np
+            m = transcribe._load_model("tiny", on_progress)
+            list(m.transcribe(np.zeros(16000, np.float32), beam_size=1)[0])
+            return ver, transcribe.device_note, transcribe.gpu_status()
+        self.gpu_btn.setEnabled(False)
+        self.gpu_bar.show()
+        w = Worker(job)
+
+        def prog(f, m):
+            if f < 0:
+                self.gpu_bar.setRange(0, 0)
+            else:
+                self.gpu_bar.setRange(0, 1000)
+                self.gpu_bar.setValue(int(f * 1000))
+            self.gpu_lbl.setText(m)
+
+        def done(r):
+            ver, dev, why = r
+            self._update_gpu_row()
+            if dev.startswith("NVIDIA"):
+                self.statusBar().showMessage("⚡ GPU speed-up working - speech now runs on your NVIDIA GPU", 8000)
+            else:
+                QMessageBox.warning(self, "GPU speed-up", "The libraries were installed, but the GPU still couldn't "
+                                    f"run the speech model, so the CPU will be used.\n\nDetails: {why[:300]}\n\n"
+                                    "Updating your NVIDIA driver usually fixes this.")
+        w.progress.connect(prog)
+        w.done.connect(done)
+        w.failed.connect(lambda m: (QMessageBox.warning(self, "GPU speed-up", m), self._update_gpu_row()))
+        w.cancelled.connect(self._update_gpu_row)
+        w.finished.connect(lambda: (self.gpu_btn.setEnabled(True), self.gpu_bar.hide()))
         self._start(w)
 
     # ---- AI models

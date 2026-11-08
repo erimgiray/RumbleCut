@@ -27,6 +27,7 @@ def diagnose(out_path: str, with_asr: bool) -> int:
     check("qt_multimedia", lambda: __import__("PySide6.QtMultimedia", fromlist=["x"]) and "ok")
     check("ai_module", lambda: __import__("rumblecut.ai", fromlist=["x"]).describe())
     check("faster_whisper", lambda: __import__("faster_whisper").__version__)
+    check("gpu_speedup_source", lambda: __import__("rumblecut.gpu_pack", fromlist=["x"]).find_wheel()["filename"])
 
     def voice_check():
         import tempfile, os
@@ -63,6 +64,8 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     from rumblecut import updater
     updater.activate_downloader_override()   # use an updated downloader if one was installed
+    from rumblecut import gpu_pack
+    gpu_pack.activate()                      # NVIDIA libraries for GPU speech-to-text, if installed
     updater.cleanup_old_exe()                # remove the previous version after a self-update
     if "--versions" in sys.argv:             # diagnostics:  RumbleCut.exe --versions
         from rumblecut import __version__

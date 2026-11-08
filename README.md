@@ -110,7 +110,11 @@ Projects can be saved and reopened later (`.rcproj`).
 | **On this PC** (default) | Everything runs locally: private and free, using your GPU | Install [Ollama](https://ollama.com), then run e.g. `ollama pull llama3.1` (or `qwen2.5:14b`), press ⟳ and pick the model. LM Studio, llama.cpp and other OpenAI-compatible servers work too: choose "OpenAI-compatible" and enter the server address. |
 | **Cloud** | Claude via the Anthropic API | Paste an API key from console.anthropic.com. It's stored encrypted for your Windows account. The default model is `claude-haiku-5-5`. |
 
-Speech-to-text always runs on your PC. The speech model downloads once, on first use, into `%APPDATA%\RumbleCut\models`. **Test AI** checks the setup.
+Speech-to-text always runs on your PC.
+- **If you have an NVIDIA GPU:** press **⚡ Install GPU speed-up** (Settings → AI models) for ~10–20× faster transcription.
+  - It's a one-time 550 MB download of NVIDIA's free cuBLAS libraries from PyPI, about 800 MB on disk.
+  - The app tests the GPU before using it, and falls back to the CPU automatically if it can't run there.
+- **The 🧠 AI log** says which one is being used. The speech model downloads once, on first use, into `%APPDATA%\RumbleCut\models`. **Test AI** checks the setup.
 
 ### Rumble 403 errors
 Rumble refuses requests that don't look like a real browser. RumbleCut sends its requests with Chrome's browser fingerprint (yt-dlp with `curl_cffi`), which this needs. If a download still fails with 403, the video may be private, members-only or region-locked. Otherwise, try **Settings → Updates → update the Rumble downloader**.

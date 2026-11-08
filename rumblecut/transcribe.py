@@ -37,30 +37,68 @@ def available() -> bool:
         return False
 
 
-def _load_model(size: str, on_progress=None):
+device_note = ""           # what the last model load ended up using, for the AI log
+_gpu_broken = ""           # why the GPU can't be used this session (then we stay on CPU)
+
+_GPU_ERR = ("cublas", "cudnn", "cuda", "cudart", "nvrtc")
+
+
+def _is_gpu_error(e: Exception) -> bool:
+    m = str(e).lower()
+    return any(k in m for k in _GPU_ERR)
+
+
+def _load_model(size: str, on_progress=None, force_cpu: bool = False):
+    """Load Whisper on the NVIDIA GPU if it really works here, otherwise on the CPU.
+    The GPU is *tested* with a tiny transcription, because missing NVIDIA libraries only
+    show up when the model first runs, not when it loads."""
+    global device_note, _gpu_broken
     from faster_whisper import WhisperModel
-    if size in _model_cache:
-        return _model_cache[size]
+    from . import gpu_pack
+    gpu_pack.activate()
+    key = (size, "cpu" if force_cpu or _gpu_broken else "auto")
+    if key in _model_cache:
+        return _model_cache[key]
     root = str(config.app_data_dir() / "models")
-    attempts = []
-    try:
-        import ctranslate2
-        if ctranslate2.get_cuda_device_count() > 0:
-            attempts.append(("cuda", "float16"))
-    except Exception:
-        pass
-    attempts.append(("cpu", "int8"))
-    last = None
-    for device, compute in attempts:
+    try_gpu = not force_cpu and not _gpu_broken and gpu_pack.nvidia_gpu_present() \
+        and config.load_settings().get("speech_gpu", True)
+    if try_gpu:
         try:
             if on_progress:
-                on_progress(-1.0, f"Loading speech model '{size}' ({device.upper()}) - first use downloads it…")
-            m = WhisperModel(size, device=device, compute_type=compute, download_root=root)
-            _model_cache[size] = m
+                on_progress(-1.0, f"Loading speech model '{size}' on the GPU - first use downloads it…")
+            m = WhisperModel(size, device="cuda", compute_type="float16", download_root=root)
+            import numpy as np
+            list(m.transcribe(np.zeros(16000, np.float32), beam_size=1)[0])     # actually run it once
+            device_note = "NVIDIA GPU"
+            _model_cache[key] = m
             return m
-        except Exception as e:      # e.g. CUDA libraries missing -> fall back to CPU
-            last = e
-    raise RuntimeError(f"Couldn't load the speech model: {last}")
+        except Exception as e:      # e.g. cublas64_12.dll missing -> use the CPU
+            _gpu_broken = str(e)
+            key = (size, "cpu")
+            if key in _model_cache:
+                return _model_cache[key]
+    if on_progress:
+        on_progress(-1.0, f"Loading speech model '{size}' on the CPU - first use downloads it…")
+    try:
+        m = WhisperModel(size, device="cpu", compute_type="int8", download_root=root)
+    except Exception as e:
+        raise RuntimeError(f"Couldn't load the speech model: {e}") from e
+    device_note = "CPU" + (" (the GPU needs the free GPU speed-up: Settings → AI models)"
+                           if _gpu_broken and _is_gpu_error(Exception(_gpu_broken)) else "")
+    _model_cache[key] = m
+    return m
+
+
+def gpu_status() -> str:
+    """'' if fine, else why the GPU isn't being used."""
+    return _gpu_broken
+
+
+def reset() -> None:
+    """Forget loaded models and GPU failures (after installing / removing the GPU speed-up)."""
+    global _gpu_broken
+    _model_cache.clear()
+    _gpu_broken = ""
 
 
 def _read_wav(path):
@@ -93,14 +131,26 @@ def transcribe(src: str, model_size: str | None = None, duration: float = 0.0,
         if on_progress:
             on_progress(-1.0, "Extracting audio…")
         ft.run(args, cancel=cancel)
-        audio = _read_wav(wav)   # pass samples directly - avoids faster-whisper's PyAV decoder,
-        segments, info = model.transcribe(audio, vad_filter=True, beam_size=1)   # which breaks on new PyAV
-        total = (end - start) if end else (duration or getattr(info, "duration", 0) or 1.0)
-        out: list[Segment] = []
-        for seg in segments:
-            if cancel and cancel():
-                raise Cancelled()
-            out.append((float(seg.start) + start, float(seg.end) + start, seg.text.strip()))
-            if on_progress:
-                on_progress(min(1.0, seg.end / total), "Transcribing speech…")
-    return out
+        audio = _read_wav(wav)   # pass samples directly - avoids faster-whisper's PyAV decoder (breaks on new PyAV)
+        for attempt in (1, 2):
+            try:
+                segments, info = model.transcribe(audio, vad_filter=True, beam_size=1)
+                total = (end - start) if end else (duration or getattr(info, "duration", 0) or 1.0)
+                out: list[Segment] = []
+                for seg in segments:
+                    if cancel and cancel():
+                        raise Cancelled()
+                    out.append((float(seg.start) + start, float(seg.end) + start, seg.text.strip()))
+                    if on_progress:
+                        on_progress(min(1.0, seg.end / total), "Transcribing speech…")
+                return out
+            except Cancelled:
+                raise
+            except Exception as e:
+                if attempt == 1 and _is_gpu_error(e):        # GPU failed mid-way: redo this on the CPU
+                    global _gpu_broken
+                    _gpu_broken = str(e)
+                    model = _load_model(model_size, on_progress, force_cpu=True)
+                    continue
+                raise
+    return []
