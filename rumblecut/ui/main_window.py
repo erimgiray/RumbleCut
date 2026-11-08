@@ -7,8 +7,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPalette, QPixmap, QValidator
+import re
+
+from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPalette,
+                           QPen, QPixmap, QValidator)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
@@ -129,6 +132,111 @@ class TimeSpinBox(QDoubleSpinBox):
         return (QValidator.Acceptable if ok else QValidator.Invalid), text, pos
 
 
+def _num_icon(n: int, px: int = 26) -> QIcon:
+    """The circled step number on the Get video / Clip studio / Export tabs, drawn crisp at any DPI."""
+    icon = QIcon()
+    for state, col in ((QIcon.Off, QColor("#9ca3af")), (QIcon.On, QColor("#ffffff"))):
+        for scale in (1, 2):
+            pm = QPixmap(px * scale, px * scale)
+            pm.setDevicePixelRatio(scale)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(col, 1.6))
+            p.drawEllipse(QRectF(1.5, 1.5, px - 3, px - 3))
+            f = QFont()
+            f.setPixelSize(int(px * 0.56))
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(QRectF(0, 0, px, px), Qt.AlignCenter, str(n))
+            p.end()
+            icon.addPixmap(pm, QIcon.Normal, state)
+    return icon
+
+
+def _menu_icon(w: int = 18, h: int = 14) -> QIcon:
+    """Three equally spaced lines (the ☰ glyph renders unevenly in most fonts)."""
+    icon = QIcon()
+    for col, mode in ((QColor("#d1d5db"), QIcon.Normal), (QColor("#ffffff"), QIcon.Active)):
+        for scale in (1, 2):
+            pm = QPixmap(w * scale, h * scale)
+            pm.setDevicePixelRatio(scale)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(col, 2)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            for y in (1.5, h / 2, h - 1.5):          # top, middle, bottom: equal gaps
+                p.drawLine(QPointF(1.5, y), QPointF(w - 1.5, y))
+            p.end()
+            icon.addPixmap(pm, mode)
+    return icon
+
+
+_UNITS = {"h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+          "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+          "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "": 1}
+
+
+def fmt_secs(v: int) -> str:
+    v = int(v)
+    return f"{v // 60} min" if v >= 60 and v % 60 == 0 else f"{v} seconds"
+
+
+def parse_secs(text: str):
+    t = text.strip().lower()
+    m = re.fullmatch(r"(\d+):(\d{1,2})", t)                 # 1:30
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    total, pos = 0.0, 0
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*([a-z]*)", t):   # 1 min 30 s, 90, 2m
+        if m.group(2) not in _UNITS or t[pos:m.start()].strip():
+            return None
+        total += float(m.group(1)) * _UNITS[m.group(2)]
+        pos = m.end()
+    return int(round(total)) if pos and not t[pos:].strip() else None
+
+
+class PresetBox(QComboBox):
+    """A dropdown of common values that you can also type into (e.g. "90 s", "2 min", "1:30").
+    Behaves like a QSpinBox for the rest of the code: value(), setValue(), valueChanged."""
+    valueChanged = Signal(int)
+
+    def __init__(self, presets, fmt=str, parse=None, lo=0, hi=10 ** 6):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self._fmt, self._parse = fmt, parse or (lambda t: int(t) if t.strip().isdigit() else None)
+        self._lo, self._hi = lo, hi
+        self._value = int(presets[0])
+        for v in presets:
+            self.addItem(fmt(v), int(v))
+        self.setEditText(fmt(self._value))
+        self.activated.connect(lambda i: self.setValue(self.itemData(i)))
+        self.lineEdit().editingFinished.connect(self._typed)
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, v):
+        v = int(max(self._lo, min(self._hi, int(v))))
+        changed = v != self._value
+        self._value = v
+        self.blockSignals(True)
+        i = self.findData(v)
+        if i >= 0:
+            self.setCurrentIndex(i)
+        self.setEditText(self._fmt(v))
+        self.blockSignals(False)
+        if changed:
+            self.valueChanged.emit(v)
+
+    def _typed(self):
+        v = self._parse(self.currentText())
+        self.setValue(self._value if v is None else v)
+
+
 def section(title: str) -> QLabel:
     l = QLabel(title)
     l.setObjectName("section")
@@ -158,9 +266,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
-        self.tabs.addTab(self._build_get_tab(), "①  Get video")
-        self.tabs.addTab(self._build_studio_tab(), "②  Clip studio")
-        self.tabs.addTab(self._build_export_tab(), "③  Export")
+        self.tabs.addTab(self._build_get_tab(), _num_icon(1), "Get video")
+        self.tabs.addTab(self._build_studio_tab(), _num_icon(2), "Clip studio")
+        self.tabs.addTab(self._build_export_tab(), _num_icon(3), "Export")
+        self.tabs.setIconSize(QSize(26, 26))
         self.tabs.addTab(self._build_context_tab(), "✨  Context images  (coming soon)")
         _sc = QScrollArea()
         _sc.setWidgetResizable(True)
@@ -169,6 +278,11 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self._build_menu()
         self._update_no_video("")
+        from PySide6.QtWidgets import QAbstractSpinBox
+        for sb in self.findChildren(QAbstractSpinBox):     # a little breathing room before the numbers
+            le = sb.findChild(QLineEdit)
+            if le is not None:
+                le.setTextMargins(6, 0, 0, 0)
         sb = QStatusBar()                  # kept for messages, but never shown as a strip
         self.setStatusBar(sb)
         sb.hide()
@@ -234,14 +348,29 @@ class MainWindow(QMainWindow):
         self.menu_root = root
         btn = QToolButton()
         btn.setObjectName("hamburgerBtn")
-        btn.setText("☰")
+        btn.setIcon(_menu_icon())
+        btn.setIconSize(QSize(18, 14))
+        btn.setFixedSize(40, 32)
         btn.setToolTip("Menu")
         btn.setPopupMode(QToolButton.InstantPopup)
         btn.setMenu(root)
         btn.setCursor(Qt.PointingHandCursor)
         self.menu_btn = btn
-        self.tabs.setCornerWidget(btn, Qt.TopLeftCorner)
+        # sits on the tab bar's left end (the tabs are pushed right by `QTabWidget::tab-bar { left }`),
+        # centred on the tabs' height - a corner widget gets placed too low by Qt
+        btn.setParent(self.tabs)
+        btn.raise_()
+        self._place_menu_btn()
         btn.show()
+
+    def _place_menu_btn(self):
+        h = self.tabs.tabBar().height() or self.tabs.tabBar().sizeHint().height()
+        self.menu_btn.move(6, max(0, (h - self.menu_btn.height()) // 2))
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if hasattr(self, "menu_btn"):
+            QTimer.singleShot(0, self._place_menu_btn)
 
     def _check_ffmpeg(self):
         try:
@@ -280,7 +409,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_info)
         row.addWidget(self.btn_dl)
         self.btn_scan = QPushButton("⚡ Scan audio first")
-        self.btn_scan.setToolTip("Download only the sound (MP3), find the best moments, then fetch video just "
+        self.btn_scan.setToolTip("Download only the sound (kept exactly as in the stream), find the best moments, then fetch video just "
                                  "for the moments you pick - much faster for long streams")
         self.btn_scan.clicked.connect(lambda: self.start_download(audio_only=True))
         row.addWidget(self.btn_scan)
@@ -459,7 +588,8 @@ class MainWindow(QMainWindow):
                 self.player.setSource(QUrl())
             self.project = editor.Project(export=self.project.export)
             self.result, self.info, self.candidates = None, None, []
-            self.src_label.setText("No video loaded")
+            self.src_label.setText("")
+            self.src_label.hide()
             self.timeline.set_data(0)
             self.timeline.set_clips([])
             self.timeline.set_sections([])
@@ -624,23 +754,29 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(10, 8, 10, 8)
 
         # analysis controls
-        self.src_label = ElidedLabel("No video loaded")
+        self.src_label = ElidedLabel("")
         self.src_label.setObjectName("h2")
+        self.src_label.hide()                   # the player already says when nothing is loaded
         v.addWidget(self.src_label)
         bar = QHBoxLayout()
         s = config.load_settings()
-        self.n_clips = QSpinBox(); self.n_clips.setRange(1, 50); self.n_clips.setValue(int(s.get("batch_size", 5)))
+        self.n_clips = PresetBox([5, 10, 15], str, lo=1, hi=50)
+        self.n_clips.setValue(int(s.get("batch_size", 5)))
         self.n_clips.setToolTip("How many moments to show at a time - press “5 more” under the list for the next batch")
-        self.min_len = QSpinBox(); self.min_len.setRange(3, 600); self.min_len.setSuffix(" s")
+        self.min_len = PresetBox([300, 600, 900, 1200, 1800], fmt_secs, parse_secs, lo=3, hi=3600)
         self.min_len.setValue(int(s.get("clip_min", 15)))
-        self.min_len.setToolTip("Shortest a clip can be. Short moments get extra lead-in time.")
-        self.max_len = QSpinBox(); self.max_len.setRange(5, 1200); self.max_len.setSuffix(" s")
+        self.min_len.setToolTip("Shortest a clip can be. Pick one or type your own, e.g. “20 s” or “1:30”. "
+                                "Short moments get extra lead-in time.")
+        self.max_len = PresetBox([300, 600, 900, 1200, 1800], fmt_secs, parse_secs, lo=5, hi=3600)
         self.max_len.setValue(int(s.get("clip_max", 45)))
-        self.max_len.setToolTip("Longest a clip can be. Long heated stretches are trimmed around their peak.")
+        self.max_len.setToolTip("Longest a clip can be. Pick one or type your own, e.g. “45 s” or “2 min”. "
+                                "Long heated stretches are trimmed around their peak.")
         self.min_len.valueChanged.connect(lambda x: self.max_len.value() < x and self.max_len.setValue(x))
         self.max_len.valueChanged.connect(lambda x: self.min_len.value() > x and self.min_len.setValue(x))
-        self.min_gap = QSpinBox(); self.min_gap.setRange(0, 1800); self.min_gap.setSuffix(" s")
+        self.min_gap = PresetBox([10, 20, 30], fmt_secs, parse_secs, lo=0, hi=1800)
         self.min_gap.setValue(int(s["min_gap"]))
+        for b, wdt in ((self.n_clips, 64), (self.min_len, 118), (self.max_len, 118), (self.min_gap, 118)):
+            b.setMinimumWidth(wdt)
         self.use_scenes = QCheckBox("Scene changes"); self.use_scenes.setChecked(bool(s["scene_detection"]))
         self.judge_by = QComboBox()
         self.judge_by.addItem("Voice & energy only (fast)", "voice")
@@ -692,8 +828,11 @@ class MainWindow(QMainWindow):
         grow.addWidget(self.btn_reask)
         v.addLayout(grow)
         prow = QHBoxLayout()
-        self.an_progress = QProgressBar(); self.an_progress.setRange(0, 1000); self.an_progress.setMaximumHeight(14)
-        self.an_progress.setTextVisible(False)
+        self.an_progress = QProgressBar(); self.an_progress.setRange(0, 1000); self.an_progress.setFixedHeight(18)
+        self.an_progress.setTextVisible(True)
+        self.an_progress.setFormat("")
+        self.an_progress.valueChanged.connect(
+            lambda v: self.an_progress.setFormat(f"{v / 10:.0f}%" if v > 0 and self.an_progress.maximum() else ""))
         self.an_status = ElidedLabel(""); self.an_status.setObjectName("muted")
         self.btn_an_cancel = QPushButton("Cancel"); self.btn_an_cancel.setEnabled(False)
         self.an_progress.setMinimumWidth(120)
@@ -936,7 +1075,7 @@ class MainWindow(QMainWindow):
 
         g2 = QGroupBox("Effects")
         fl = QFormLayout(g2)
-        self.i_speed = QComboBox(); self.i_speed.addItems(["0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"])
+        self.i_speed = QComboBox(); self.i_speed.addItems(["0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"]); self.i_speed.setCurrentText("1×")
         self.i_zoom = QSlider(Qt.Horizontal); self.i_zoom.setRange(100, 200)
         self.i_zoom_lbl = QLabel("100%")
         zrow = QHBoxLayout(); zrow.addWidget(self.i_zoom, 1); zrow.addWidget(self.i_zoom_lbl)
@@ -1017,7 +1156,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ video loading
     def open_video_dialog(self):
         p, _ = QFileDialog.getOpenFileName(self, "Open video", str(config.download_dir()),
-                                           "Video files (*.mp4 *.mkv *.mov *.webm *.avi *.flv *.ts *.m4v);;All files (*)")
+                                           "Video or audio (*.mp4 *.mkv *.mov *.webm *.avi *.flv *.ts *.m4v *.m4a *.mp3 *.aac *.opus *.wav);;All files (*)")
         if p:
             self.load_video(p)
 
@@ -1074,6 +1213,7 @@ class MainWindow(QMainWindow):
             part += "   ·   🔊 audio only"
         dims = f"   ·   {self.info.width}×{self.info.height}" if self.info.has_video else ""
         self.src_label.setText(f"{self.project.title}   ·   {fmt_time(self.info.duration)}{dims}{part}")
+        self.src_label.show()
         self.timeline.time_fn = self.project.to_stream
         self.timeline.joins = [sg[0] for sg in self.project.segments[1:]]
         self.timeline.set_data(self.info.duration)
@@ -1112,7 +1252,7 @@ class MainWindow(QMainWindow):
 
     def run_analysis(self, reuse: bool = False):
         if not self.project.source:
-            QMessageBox.information(self, APP_NAME, "Load a video first (tab ①).")
+            QMessageBox.information(self, APP_NAME, "Load a video first (tab 1, Get video).")
             return
         ai_clips = [c for c in self.project.clips if c.origin != "user"]
         ticked_fetched = [c for c in ai_clips if c.source != self.project.source]
@@ -2881,12 +3021,15 @@ QLabel#h2 {{ font-size: 11pt; font-weight: 600; }}
 QLabel#section {{ font-weight: 600; color: #cbd5e1; padding: 4px 0; }}
 QLabel#muted {{ color: #8b95a3; }}
 QLabel#badge {{ background: {ACCENT}; color: #0b0d10; font-weight: 700; padding: 3px 10px; border-radius: 9px; }}
+QTabWidget::tab-bar {{ left: 48px; }}
+QTabWidget#lefttabs::tab-bar {{ left: 0; }}
 QTabBar::tab {{ padding: 10px 22px; background: #15171b; color: #9ca3af; border: none; }}
 QTabBar::tab:selected {{ color: #fff; border-bottom: 3px solid {ACCENT}; background: #1b1d22; }}
 QGroupBox {{ border: 1px solid #2c3038; border-radius: 8px; margin-top: 14px; padding: 10px 8px 8px 8px; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #cbd5e1; font-weight: 600; }}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ background: #121418; border: 1px solid #2f343d;
-    border-radius: 6px; padding: 5px 7px; selection-background-color: {ACCENT}; }}
+    border-radius: 6px; padding: 5px 7px 5px 11px; selection-background-color: {ACCENT}; }}
+QComboBox QAbstractItemView {{ background: #1f2228; border: 1px solid #2c3038; selection-background-color: #2d3a22; padding: 4px; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QPushButton, QToolButton {{ background: #2a2e36; border: 1px solid #353a44; border-radius: 6px; padding: 6px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background: #333844; }}
@@ -2904,6 +3047,15 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #333844; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; margin: -6px 0; border-radius: 7px; }}
 QScrollArea {{ border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px 2px 3px 0; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0 3px 2px 3px; }}
+QScrollBar::handle:vertical {{ background: #3a3f49; border-radius: 4px; min-height: 30px; }}
+QScrollBar::handle:horizontal {{ background: #3a3f49; border-radius: 4px; min-width: 30px; }}
+QScrollBar::handle:hover {{ background: #545b68; }}
+QScrollBar::handle:pressed {{ background: {ACCENT}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; border: none; background: none; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
+QAbstractScrollArea::corner {{ background: transparent; }}
 QPlainTextEdit#ailog {{ font-family: Consolas, "Cascadia Mono", monospace; font-size: 9pt; }}
 QTabWidget#lefttabs::pane {{ border: none; }}
 QLabel#novideo {{ background: #0e0f12; color: #e5e7eb; font-size: 14px; border-radius: 6px; }}
@@ -2912,7 +3064,7 @@ QLabel#toast {{ background: #2a3a1e; color: #e5e7eb; border: 1px solid {ACCENT};
 QToolTip {{ background: #1f2228; color: #e5e7eb; border: 1px solid #3a404b; padding: 6px; }}
 QFrame#banner {{ background: #1f2a17; border: 1px solid #3d5a26; border-radius: 8px; }}
 QFrame#banner QLabel, QFrame#banner QCheckBox {{ background: transparent; }}
-QToolButton#hamburgerBtn {{ font-size: 17px; padding: 2px 10px; border: none; background: transparent; }}
+QToolButton#hamburgerBtn {{ padding: 0; border: none; background: transparent; }}
 QToolButton#hamburgerBtn:hover {{ background: #2a2e36; border-radius: 6px; }}
 QToolButton#hamburgerBtn::menu-indicator {{ image: none; width: 0; }}
 QPushButton#more {{ background: #20242b; border: 1px dashed #4b5260; padding: 9px; color: #cbd5e1; }}

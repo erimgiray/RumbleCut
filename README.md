@@ -42,7 +42,7 @@ Options:
   Clip titles and `clips.csv` still show times in the **original stream**, so you can find each moment again.
 
 **⚡ Scan audio first (fastest for long streams):** paste the link and press **⚡ Scan audio first** instead of Download.
-1. Only the sound is downloaded, as an MP3. If Rumble has no separate audio track, the smallest video version is fetched and only its sound is kept.
+1. Only the sound is downloaded. If Rumble has no separate audio track, the version with the best sound is fetched and only its sound is kept, copied exactly as it is in the stream (no re-encoding), as an `.m4a`.
 2. The best moments appear in the Clip studio. Press **▶ Play clip** to listen to each one, and tick the ones you like.
 3. Press **⬇ Get video for ticked moments**.
 
@@ -68,6 +68,7 @@ The **Only download part of the video** box and its times are remembered between
   - The sections also show as a thin strip along the bottom of the timeline (gold = interesting, grey = filler).
   - Click a section to listen to it. Tick the ones you like and press **★ Add to Moments** (or double-click one) to add them to the top of Moments as **your picks**.
 - **Your picks** (sections you add, clips you add with **＋ Add** or **⧉ Copy**) are marked ★ and shown in gold, at the top of Moments and on the timeline, so they don't mix with the app's guesses. They're kept when you run **Find highlights** or **↻ Ask AI again**.
+- **Show / Min length / Max length / Gap** are dropdowns with common choices (5 / 10 / 15 moments; 5 to 30 min; 10 / 20 / 30 seconds). You can also type your own value, e.g. `45 s`, `2 min` or `1:30`.
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
 - **How each clip's time range is chosen:**

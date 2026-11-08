@@ -157,7 +157,7 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
              cancel: Callable[[], bool] | None = None,
              audio_only: bool = False) -> DownloadResult:
     """Download a video. With `ranges`, only those parts are fetched (one file per range).
-    With `audio_only`, just the sound is saved as an MP3 - a fraction of the size, used to
+    With `audio_only`, just the sound is saved (its original stream copied, not re-encoded) - a fraction of the size, used to
     find the best moments before downloading any video. Rumble often has no separate
     audio track; then the smallest video version is fetched and only its audio kept.
     Progress fraction is -1 when the size isn't known yet (show a busy bar)."""
@@ -195,7 +195,7 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
             done_all = state["section"] >= max(1, n_sections)
             if done_all:
                 on_progress(-1.0 if audio_only else 1.0,
-                            "Converting to MP3…" if audio_only else "Finishing up…")
+                            "Saving the sound…" if audio_only else "Finishing up…")
             else:   # next part starts; its size isn't known in advance -> busy bar
                 on_progress(-1.0, f"Part {state['section']} of {n_sections} saved  •  "
                                   f"downloading part {state['section'] + 1}…")
@@ -209,7 +209,7 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
     else:
         tmpl = "%(title).90B [%(id)s].%(ext)s"
     opts = {
-        "format": ("ba/b[height<=360]/w" if audio_only
+        "format": ("ba/b" if audio_only
                    else QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])),
         "outtmpl": str(out_dir / tmpl),
         "merge_output_format": "mp4",
@@ -227,8 +227,12 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
     }
     if audio_only:
         opts.pop("merge_output_format", None)
-        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
-                                   "preferredquality": "5"}]          # VBR, about 130 kb/s
+        # Rumble usually has no audio-only track: take the version with the best sound (and the
+        # smallest picture among those), then keep its audio stream exactly as it is - copied, not
+        # re-encoded, so the scan sounds like the stream. Only non-AAC sound is converted (to AAC).
+        opts["format_sort"] = ["abr", "+res", "+size"]
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a",
+                                   "preferredquality": "192"}]
     if ranges:
         from yt_dlp.utils import download_range_func
         opts["download_ranges"] = download_range_func(
@@ -260,7 +264,7 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
     files = []
     for p in paths:
         pp = Path(p)
-        for ext in ((".mp3",) if audio_only else ()) + (".mp4",):
+        for ext in ((".m4a", ".mp3") if audio_only else ()) + (".mp4",):
             if (not pp.exists() or pp.suffix != ext and audio_only) and pp.with_suffix(ext).exists():
                 pp = pp.with_suffix(ext)
                 break
@@ -303,9 +307,10 @@ def _join_audio_parts(sections: list[Section], out_dir: Path, info: dict):
         length = ffmpeg_tools.MediaInfo(sec.path).duration
         segments.append([round(pos, 3), float(sec.start), round(length, 3)])
         pos += length
-    name = "%s [%s] audio %s.mp3" % (
+    ext = Path(parts[0].path).suffix or ".m4a"
+    name = "%s [%s] audio %s" % (
         ffmpeg_tools.safe_filename(info.get("title") or "stream", 70), info.get("id") or "x",
-        "+".join(f"{fmt(s.start).replace(':', '.')}" for s in parts))
+        "+".join(f"{fmt(s.start).replace(':', '.')}" for s in parts)) + ext
     joined = out_dir / name
     if len(parts) == 1:
         Path(parts[0].path).replace(joined)
@@ -314,7 +319,13 @@ def _join_audio_parts(sections: list[Section], out_dir: Path, info: dict):
         lst.write_text("".join("file '%s'\n" % str(Path(p.path).resolve()).replace("'", "'\\''")
                                for p in parts), encoding="utf-8")
         ffmpeg_tools.run([ffmpeg_tools.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
-                          "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
+                          "-safe", "0", "-i", str(lst)]
+                         + (["-c", "copy"] if ext == ".mp3" else
+                            # .m4a parts carry trim info that a plain copy-join ignores (each part
+                            # would gain ~0.5 s and the stream times would drift), so they're decoded
+                            # and saved once at a high bitrate - transparent next to Rumble's audio
+                            ["-c:a", "aac", "-b:a", "192k"])
+                         + [str(joined)])
         lst.unlink(missing_ok=True)
         for p in parts:
             Path(p.path).unlink(missing_ok=True)
