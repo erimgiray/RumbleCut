@@ -308,6 +308,10 @@ class RangesEditor(QWidget):
             self._add_row(a.strip(), b.strip(), to_end=bool(sep) and not b.strip())
         self.textChanged.emit(self.text())
 
+    def row_height(self) -> int:
+        r = self._rows[0] if self._rows else None
+        return r["w"].sizeHint().height() if r else 30
+
     def set_duration(self, d: float):
         self._duration = float(d or 0)
         for r in self._rows:
@@ -632,6 +636,8 @@ class MainWindow(QMainWindow):
         self.part_only.toggled.connect(lambda on: config.save_settings({"part_only": on}))
         self.ranges_edit.editingFinished.connect(
             lambda: config.save_settings({"part_ranges": self.ranges_edit.text().strip()}))
+        # as tall as one Starts from / Ends at row, so the tick box lines up with the first row
+        self.part_only.setFixedHeight(max(self.ranges_edit.row_height(), self.part_only.sizeHint().height()))
         pg.addWidget(self.part_only, 0, 0, Qt.AlignTop)
         pg.addWidget(self.ranges_edit, 0, 1)
         pg.addWidget(self.ranges_info, 1, 1)
