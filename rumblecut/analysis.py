@@ -147,6 +147,34 @@ def _fmt(t: float) -> str:
     return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
 
 
+def _sentence_start(t: float, starts, ends, reach: float = 8.0):
+    """Start of the sentence that's being spoken at t, so a clip never begins mid-sentence.
+    None where nothing was transcribed near t."""
+    if starts is None or not len(starts):
+        return None
+    j = int(np.searchsorted(starts, t - 0.3))
+    if j < len(starts) and starts[j] <= t + 1.0:          # a line starting right at t (AI times are rounded down)
+        return float(starts[j])
+    k = j - 1                                             # the sentence under t
+    if k >= 0 and ends[k] >= t - 0.3 and t - starts[k] <= reach:
+        return float(starts[k])
+    if k >= 0 and ends[k] < t - 0.3 and j < len(starts) and starts[j] - t <= 3.0:   # in a pause
+        return float(starts[j])
+    return None
+
+
+def _sentence_end(t: float, starts, ends, reach: float = 8.0):
+    """End of the sentence being spoken at t, so a clip never stops mid-sentence."""
+    if ends is None or not len(ends):
+        return None
+    k = int(np.searchsorted(starts, t, side="right")) - 1
+    if k >= 0 and ends[k] >= t - 0.3 and ends[k] - t <= reach:
+        return float(ends[k]) + 0.3
+    if k >= 0 and ends[k] < t - 0.3 and t - ends[k] <= 2.0:
+        return float(ends[k]) + 0.3
+    return None
+
+
 def _snap_to_pause(t: float, loud: np.ndarray, window: float = 2.5) -> float:
     i = int(round(t / HOP))
     w = int(window / HOP)
@@ -314,7 +342,9 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                 if not taken[i]:
                     peaks.append(i)
                     taken[max(0, i - int(60 / HOP)): i + int(60 / HOP)] = True
-            raw = [(max(0.0, i * HOP - 50), min(dur, i * HOP + 40)) for i in peaks]
+            # (reaching well back, so the AI also hears what led up to each one - the question,
+            # the claim, the start of the story)
+            raw = [(max(0.0, i * HOP - 75), min(dur, i * HOP + 40)) for i in peaks]
             # ...plus an even sample across the whole stream, so calm parts get read too
             every = 300.0 if dur > 1800 else max(60.0, dur / 6)
             raw += [(t, min(dur, t + 90.0)) for t in np.arange(every / 2, dur, every)]
@@ -459,6 +489,9 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         taken[max(0, i - gap_hops): i + gap_hops + 1] = True
 
     scene_arr = np.asarray(scene_t) if scene_t else None
+    segs_sorted = sorted((float(a_), float(b_)) for a_, b_, t_ in transcript if str(t_).strip())
+    seg_starts = np.array([x[0] for x in segs_sorted]) if segs_sorted else None
+    seg_ends = np.array([x[1] for x in segs_sorted]) if segs_sorted else None
     floor = float(np.percentile(score, 60)) if len(score) else 0.0
     highlights: list[Highlight] = []
     for i in picks:
@@ -474,20 +507,36 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             b += 1
         ev_start, ev_end = a * HOP, b * HOP
         ai_sp = span_at.get(i)
+        ctx = None
         if ai_sp is not None and getattr(ai_sp, "source", "") == "ai":
             ev_start, ev_end = float(ai_sp.start), max(float(ai_sp.end), float(ai_sp.start) + 3)
             timing = [f"Your AI marked {show(ev_start)} – {show(ev_end)} as the moment itself."]
+            if getattr(ai_sp, "context_start", None) is not None and ai_sp.context_start < ev_start - 0.5:
+                ctx = float(ai_sp.context_start)
         else:
             timing = [f"The excitement peaks at {show(peak)}."]
             if ev_end - ev_start >= 2:
                 timing.append(f"It starts building at {show(ev_start)} and settles by {show(ev_end)}.")
 
-        # 2) add context: a lead-in so viewers see what led up to it, and a short tail
-        start, end = ev_start - lead_in, ev_end + 2.0
-        timing.append(f"The clip starts {lead_in:.0f} s before that so viewers get the build-up, "
-                      "and runs 2 s past the end.")
+        # 2) add context. With the AI: start where the thought starts (the question, the claim,
+        #    the start of the story) and end once the point has landed. Otherwise a lead-in.
+        if ctx is not None:
+            start, end = ctx, ev_end + 1.0
+            setup = getattr(ai_sp, "setup", "")
+            timing.append(f"It starts at {show(ctx)}" + (f" so you first hear {setup}" if setup else
+                          " where what it responds to is first raised") +
+                          ", and ends once the point has landed.")
+        else:
+            start, end = ev_start - lead_in, ev_end + 2.0
+            timing.append(f"The clip starts {lead_in:.0f} s before that so viewers get the build-up, "
+                          "and runs 2 s past the end.")
+            # don't reach back into a different topic
+            sec = sec_at.get(int(ev_start / HOP))
+            if sec is not None and start < sec.start <= ev_start - 1.0:
+                start = float(sec.start)
+                timing.append("It doesn't reach back before this topic started.")
 
-        # 3) respect min / max length (extend mostly before the peak, trim mostly after it)
+        # 3) respect min / max length
         length = end - start
         if length < min_len:
             extra = min_len - length
@@ -495,33 +544,68 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             end += extra * 0.4
             timing.append(f"Lengthened to your minimum of {min_len:.0f} s (extra time added mostly before the moment).")
         elif length > max_len:
-            start = max(start, peak - 0.65 * max_len)
-            end = start + max_len
-            timing.append(f"Shortened to your maximum of {max_len:.0f} s, keeping the peak and what led up to it.")
+            if ctx is not None and ev_end + 1.0 - ctx > max_len:
+                # the setup is longer than the clip can be: keep the payoff, start at the latest
+                # sentence that still leaves room for it
+                start = max(ctx, ev_end + 1.0 - max_len)
+                end = start + max_len
+                timing.append(f"The full setup is {ev_end + 1.0 - ctx:.0f} s - more than your maximum of "
+                              f"{max_len:.0f} s - so it starts at the latest sentence that keeps the payoff.")
+            elif ctx is not None:
+                end = start + max_len
+                timing.append(f"Trimmed at the end to your maximum of {max_len:.0f} s.")
+            else:
+                start = max(start, peak - 0.65 * max_len)
+                end = start + max_len
+                timing.append(f"Shortened to your maximum of {max_len:.0f} s, keeping the peak and what led up to it.")
 
-        # 4) snap to natural cut points without breaking the limits
+        # 4) cut points: whole sentences where we have the words, otherwise pauses / scene cuts
         s0, e0 = start, end
-        start = _snap_to_pause(start, short)
-        end = _snap_to_pause(end, short, window=3.0)
-        snapped_scene = False
-        if scene_arr is not None and len(scene_arr):
-            near = scene_arr[np.abs(scene_arr - start) < 2.0]
-            if len(near):
-                start = float(near[np.argmin(np.abs(near - start))])
-                snapped_scene = True
-        if end - start < min_len or end - start > max_len:      # snapping broke a limit: undo it
-            start, end = s0, e0
+        ss = _sentence_start(start, seg_starts, seg_ends)
+        se = _sentence_end(end, seg_starts, seg_ends)
+        on_words = ss is not None and se is not None
+        if on_words:
+            start, end = ss, se
+            if end - start > max_len + 0.5:
+                # too long in whole sentences: start at a later sentence (keeping the moment), or
+                # failing that end at an earlier one (keeping the payoff), or cut as a last resort
+                later = seg_starts[(seg_starts >= end - max_len - 0.5) & (seg_starts <= ev_start + 0.5)]
+                earlier = seg_ends[(seg_ends + 0.3 <= start + max_len + 0.5) & (seg_ends >= ev_end - 0.5)]
+                if len(later):
+                    start = float(later[0])
+                elif len(earlier):
+                    end = float(earlier[-1]) + 0.3
+                else:
+                    end = start + max_len
+            elif end - start < min_len - 0.5:
+                before = seg_starts[seg_starts <= end - min_len + 0.5]
+                after = seg_ends[seg_ends + 0.3 >= start + min_len - 0.5]
+                if len(before) and end - before[-1] <= max_len + 0.5:
+                    start = float(before[-1])
+                elif len(after) and after[0] + 0.3 - start <= max_len + 0.5:
+                    end = float(after[0]) + 0.3
+                else:
+                    end = start + min_len
+            if abs(start - s0) > 0.4 or abs(end - e0) > 0.4:
+                timing.append("It begins and ends on whole sentences, so no one is cut off mid-sentence.")
         else:
-            moved = []
-            if abs(start - s0) > 0.4:
-                moved.append("start")
-            if abs(end - e0) > 0.4:
-                moved.append("end")
-            if moved:
-                what = " and ".join(moved)
-                timing.append(f"The {what} {'were' if len(moved) > 1 else 'was'} moved to "
-                              f"{'a scene cut' if snapped_scene and 'start' in moved else ('natural pauses' if len(moved) > 1 else 'a natural pause')} "
-                              "so speech isn't cut mid-word.")
+            start = _snap_to_pause(start, short)
+            end = _snap_to_pause(end, short, window=3.0)
+            snapped_scene = False
+            if scene_arr is not None and len(scene_arr):
+                near = scene_arr[np.abs(scene_arr - start) < 2.0]
+                if len(near):
+                    start = float(near[np.argmin(np.abs(near - start))])
+                    snapped_scene = True
+            if end - start < min_len or end - start > max_len:      # snapping broke a limit: undo it
+                start, end = s0, e0
+            else:
+                moved = [w for w, d in (("start", start - s0), ("end", end - e0)) if abs(d) > 0.4]
+                if moved:
+                    what = " and ".join(moved)
+                    where = "a scene cut" if snapped_scene and "start" in moved else "natural pauses"
+                    timing.append(f"The {what} {'were' if len(moved) > 1 else 'was'} moved to {where} "
+                                  "so speech isn't cut mid-word.")
         # 5) keep inside the file and never cut off the moment itself
         if start < 0:
             end, start = min(dur, end - start), 0.0

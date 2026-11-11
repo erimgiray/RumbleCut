@@ -70,11 +70,12 @@ The **Only download part of the video** box and its times are remembered between
 - **Show / Min length / Max length / Gap** are dropdowns with common choices (5 / 10 / 15 moments; 5 to 30 min; 0 / 10 / 20 / 30 seconds). You can also type your own value, e.g. `45 s`, `2 min` or `1:30`.
 - **Find highlights** scans the whole stream and draws an *excitement timeline*. Every moment it finds is ranked, but only the best **5** are shown at first, each with a reason ("Volume spike +18 dB over normal", "Sudden reaction", "Said 'no way'"). Press **＋ 5 more moments** under the list for the next batch. The batch size is the **Show** box.
 - **Hover over any moment** in the list, or over its block on the timeline, to see **why it was picked**. For example: "27 dB louder than the 2 minutes around it", "volume jumped 20 dB in a few seconds", "you said 'no way'". You also see **why it starts and ends where it does**.
-- **How each clip's time range is chosen:**
-  1. The clip covers the stretch where the excitement is clearly above normal around the peak.
-  2. It starts a few seconds earlier, so viewers get the build-up, and ends 2 s after the energy settles.
-  3. It's kept between your **Min length** and **Max length**. Short moments get extra lead-in; long ones are trimmed around their peak.
-  4. Both ends are moved to natural pauses (or scene cuts), so nobody is cut off mid-word.
+- **How each clip's time range is chosen:** a clip should make sense to someone who hasn't seen the stream, so it follows the moment's rhetorical structure.
+  1. **With an AI model,** the AI marks three points for each moment: where the context starts (the question being answered, the claim being responded to, the start of the story or argument), the moment itself, and where the point has landed (the punchline, the conclusion, the reaction). The clip runs from the first to the last. The hover text says what you hear first, e.g. "a viewer asks about tariffs".
+  2. **Without one,** the clip covers the stretch where the excitement is clearly above normal, starting a few seconds earlier for the build-up, but never reaching back into a different topic.
+  3. It's kept between your **Min length** and **Max length**. If the full setup is longer than the maximum, the clip starts at the latest sentence that still keeps the payoff.
+  4. Wherever the speech was transcribed, both ends land on **whole sentences**; elsewhere they move to natural pauses or scene cuts. Nobody is cut off mid-sentence.
+  5. Passages the AI reads reach about 75 s before each lively stretch, so it hears what led up to it. Press **↻ Ask AI again** on an older scan to get the new timing.
 - **On the timeline:** right-click empty space to add a moment of your own there (shown blue and dashed, ✎). Click a moment to select it; the selected one is drawn on top, and you can drag it to move it or drag its edges to resize it (it can't go off the visible part). Right-click a moment for options: play it, cut its start or end at the clicked spot, split it in two, duplicate, untick or delete it.
 - **Zoom the timeline:** scroll up on it to zoom in (around the mouse), down to zoom out, or use the **＋ / － / Fit** buttons beside it. Shift+scroll moves left and right while zoomed; a green bar along the top shows which part you're looking at, and the view follows the playhead and the moment you select.
 - **Scrubber:** the bar under the player shows where you are; drag it (or drag across the main timeline) to move anywhere. Blue parts have video; the rest is audio only. Where there's nothing to show (an audio-only part, or nothing loaded), the player shows an icon and a note explaining why, and you get a notice when you scrub out of a part with video.
@@ -153,7 +154,7 @@ Everything runs locally, with no AI service or internet needed:
 | **Scene changes** (optional) | bursts of on-screen action, camera cuts |
 | **Hype words** (optional, needs `faster-whisper`) | "no way", "let's go", "oh my god", "clip that"… |
 
-The signals are combined into a score. The top peaks are picked with a minimum gap between clips, and each clip is built mostly from the *build-up* to the peak. The start and end then snap to the nearest pause, so clips don't cut mid-sentence.
+The signals are combined into a score. The top peaks are picked with a minimum gap between clips, and each clip is built mostly from the *build-up* to the peak. With an AI model the clip starts where the context starts and ends when the point lands; the start and end then snap to whole sentences (or the nearest pause), so clips don't cut mid-sentence.
 
 ---
 

@@ -27,6 +27,8 @@ class Span:
     why: str              # one sentence for the hover text
     quote: str = ""
     source: str = "ai"    # "ai" | "words"
+    context_start: float | None = None   # where a viewer has to start watching to follow it
+    setup: str = ""       # what that context is, e.g. "the viewer's question about tariffs"
 
 
 @dataclass
@@ -104,17 +106,24 @@ SYSTEM = (
     "arguments, emotional or passionate rants, memorable quotable one-liners, or the payoff of a story. "
     "Ignore greetings, sponsor reads, housekeeping, reading out chat names, technical problems, "
     "transitions between topics, coughing, pauses and dull filler. Be strict: most passages contain "
-    "nothing worth clipping. Answer only with JSON."
+    "nothing worth clipping. Every clip must make sense to someone who hasn't seen the stream: it "
+    "starts where the thought or exchange starts (the question being answered, the claim being "
+    "responded to, the start of the story or argument), never mid-sentence or mid-argument, and it "
+    "ends once the point has landed (the punchline, the conclusion, the reaction). Answer only with JSON."
 )
 
 PROMPT = """{guidance}Transcript excerpt (times are positions in the stream):
 {lines}
 
 1. Split the excerpt into its sections - a new topic, story, segment or conversation starts a new section (usually 1-4 per excerpt). For each, say in one short sentence what happens, like "argues with a viewer about tariffs" or "reacts to the Vivek ad and mocks it". Rate how interesting each section is for viewers from 1-10{fit}; transitions, technical issues, reading chat names, ads and filler get 1-3.
-2. Pick the clip-worthy moments, if any. Only include moments scoring 6 or more{fit}.
+2. Pick the clip-worthy moments, if any. Only include moments scoring 6 or more{fit}. For each, think about its rhetorical structure:
+   - "context_start": the line where a viewer must start watching to follow it - where the question, claim, topic or story it depends on is first raised. It can be well before the moment itself; keep it as late as possible while still making sense on its own.
+   - "start": where the moment itself (the line that makes it good) begins.
+   - "end": the line where the point has fully landed - the punchline, the conclusion, or the reaction to it. Don't stop mid-argument.
+   - "setup": in a few words, what the viewer hears first, e.g. "a viewer asks about tariffs".
 
 Answer as:
-{{"sections": [{{"start": "m:ss", "end": "m:ss", "summary": "what happens, one sentence", "interest": 1-10}}], "moments": [{{"start": "m:ss", "end": "m:ss", "score": 1-10, "type": "funny | hot take | shocking | heated | emotional | quotable | story payoff", "why": "one short sentence saying what makes it good", "quote": "the key line, max 15 words"}}]}}
+{{"sections": [{{"start": "m:ss", "end": "m:ss", "summary": "what happens, one sentence", "interest": 1-10}}], "moments": [{{"context_start": "m:ss", "start": "m:ss", "end": "m:ss", "setup": "what the viewer hears first", "score": 1-10, "type": "funny | hot take | shocking | heated | emotional | quotable | story payoff", "why": "one short sentence saying what makes it good", "quote": "the key line, max 15 words"}}]}}
 Use start/end times from the transcript lines. Use "moments": [] if nothing stands out."""
 
 MERGE_PROMPT = """Below are consecutive sections of one livestream, each summarised separately. Some neighbouring sections are really the same conversation or topic continuing. Group neighbours that belong together and write one summary for each group.
@@ -153,7 +162,7 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
                       if g else ""),
             fit=" - and how well it matches what the editor is looking for" if g else "",
             lines=_window_lines(segs)[:6000])
-        d = ai.complete_json(prompt, SYSTEM, max_tokens=1000)
+        d = ai.complete_json(prompt, SYSTEM, max_tokens=1400)
         secs = []
         for x in d.get("sections", []) or []:
             if not isinstance(x, dict):
@@ -188,8 +197,11 @@ def ai_spans(windows: list[tuple[float, float, list[Segment]]],
             e = e if e is not None and e > s else s + 8
             s, e = max(a, min(s, b)), max(a, min(e, b + 5))
             label = str(m.get("type", "")).strip().split("|")[0].strip().capitalize() or "Interesting"
+            cs = _parse_t(m.get("context_start"))
+            cs = max(a, min(cs, s)) if cs is not None and cs < s - 0.5 else None
             found.append(Span(s, e, min(1.0, score / 10), label, str(m.get("why", "")).strip(),
-                              str(m.get("quote", "")).strip()[:140], "ai"))
+                              str(m.get("quote", "")).strip()[:140], "ai", cs,
+                              str(m.get("setup", "")).strip()[:100]))
         return found, secs
 
     done = 0
