@@ -461,7 +461,8 @@ class MainWindow(QMainWindow):
         _sc.setWidget(self._build_settings_tab())
         self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
-        self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and self.ctx_tab.refresh())
+        self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and (
+            self.script_tab if self.edit_tabs.currentIndex() == 0 else self.ctx_tab).refresh())
         self.tabs.currentChanged.connect(lambda i: i == self.pub_index and self.pub_tab.refresh())
         self._build_menu()
         self._update_no_video("")
@@ -1333,6 +1334,11 @@ class MainWindow(QMainWindow):
         fl.addRow("Start", self.i_start)
         fl.addRow("End", self.i_end)
         fl.addRow("Length", self.i_len)
+        self.btn_script = QPushButton("✂ Cut words by script")
+        self.btn_script.setToolTip("Open this moment's script in 🎬 Edit clips: delete words in the text and "
+                                   "they're cut from the clip")
+        self.btn_script.clicked.connect(self.edit_script_for_current)
+        fl.addRow("", self.btn_script)
         fl.addRow("Why", self.i_why)
         f.addWidget(g1)
 
@@ -1870,6 +1876,7 @@ class MainWindow(QMainWindow):
             else:
                 lim = (c.offset, c.offset + (self._src_duration(c.source) or (c.end + 60)))
             r_ = self.result
+            self.clip_tl.cuts = [(a + c.offset, b + c.offset) for a, b in c.cuts]
             self.clip_tl.set_clip(c.start + c.offset, c.end + c.offset, lim,
                                   getattr(r_, "times", None), getattr(r_, "score", None),
                                   user=c.origin, keep_view=keep_view)
@@ -2340,6 +2347,13 @@ class MainWindow(QMainWindow):
 
     def _pos_changed(self, ms):
         t = ms / 1000
+        if self._clip_stop_at is not None and self._media_offset is not None:   # playing a clip: skip its cuts
+            c = self.current_clip()
+            if c is not None and c.cuts and self.player.source() == QUrl.fromLocalFile(c.source):
+                for a, b in c.cuts:
+                    if a <= t < b - 0.02:
+                        self.player.setPosition(int(b * 1000))
+                        return
         if self._media_offset is not None:          # None while an effects preview is playing
             self._show_pos(t + self._media_offset)
         else:
@@ -2686,9 +2700,45 @@ class MainWindow(QMainWindow):
         self.timeline.set_view(v / 1000, v / 1000 + span)
 
     def _build_context_tab(self) -> QWidget:
+        """🎬 Edit clips: ✂ Script (cut words out by editing the text) and 🖼 Pictures."""
         from .context_tab import ContextImagesTab
+        from .script_tab import ScriptPanel
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(16, 10, 16, 12)
+        self.edit_tabs = QTabWidget()
+        self.edit_tabs.setObjectName("lefttabs")
+        self.script_tab = ScriptPanel(self)
         self.ctx_tab = ContextImagesTab(self)
-        return self.ctx_tab
+        self.edit_tabs.addTab(self.script_tab, "✂  Script")
+        self.edit_tabs.addTab(self.ctx_tab, "🖼  Pictures")
+        self.edit_tabs.currentChanged.connect(lambda i: (self.script_tab if i == 0 else self.ctx_tab).refresh())
+        v.addWidget(self.edit_tabs)
+        return page
+
+    def _clip_edited(self, c):
+        """A clip's script cuts changed in 🎬 Edit clips: refresh its length everywhere."""
+        if c not in self.project.clips:
+            return
+        r = self.project.clips.index(c)
+        if self.clip_list.item(r):
+            self.clip_list.item(r).setText(self._item_text(r, c))
+        if c is self.current_clip():
+            self.i_len.setText(f"{c.length:.1f}s  →  {c.out_length:.1f}s exported" +
+                               (f"  (✂ {len(c.cuts)} cut{'s' if len(c.cuts) != 1 else ''})" if c.cuts else ""))
+            self._show_clip_timeline(c, keep_view=True)
+            self._fill_overlays()
+
+    def edit_script_for_current(self):
+        c = self.current_clip()
+        if not c:
+            return
+        self.tabs.setCurrentIndex(self.ctx_index)
+        self.edit_tabs.setCurrentIndex(0)
+        self.script_tab.refresh()
+        self.script_tab.select_clip(c)
+        if not c.words:
+            self.script_tab.load_script()
 
     def _ai_log_line(self, line: str):
         self._log(line)
@@ -2704,6 +2754,7 @@ class MainWindow(QMainWindow):
         if not c:
             return
         self.tabs.setCurrentIndex(self.ctx_index)
+        self.edit_tabs.setCurrentIndex(1)
         self.ctx_tab.select_clip(c)
         if not any(o.status == "pending" for o in c.overlays):
             self.ctx_tab.find(all_ticked=False)

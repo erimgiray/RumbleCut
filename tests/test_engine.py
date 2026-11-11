@@ -20,7 +20,7 @@ OUT = Path(__file__).parent / "_out"
 def make_stream(path: Path) -> None:
     ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
             "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=180",
-            "-f", "lavfi", "-i", "anoisesrc=d=180:c=pink:r=48000:a=0.02",
+            "-f", "lavfi", "-i", "anoisesrc=d=180:c=pink:r=48000:a=0.02:seed=42",
             "-f", "lavfi", "-i", "sine=f=440:d=180:r=48000",
             "-filter_complex",
             "[2:a]volume='if(between(t,48,54)+between(t,128,133),0.9,0)':eval=frame[s];"

@@ -63,6 +63,26 @@ ASPECTS = {
 }
 
 OVERLAY_POSITIONS = ["top-right", "top-left", "bottom-right", "bottom-left", "center", "full"]
+PUNCH_IN = 1.08          # jump cuts: every other piece is zoomed in this much
+MIN_PIECE = 0.3          # kept pieces shorter than this are dropped (they sound like glitches)
+
+
+def kept_ranges(start: float, end: float, cuts) -> list[tuple[float, float]]:
+    """[start, end] minus the cut stretches, without slivers."""
+    pieces = [(start, end)]
+    for c in sorted((float(a), float(b)) for a, b in (cuts or []) if b > a):
+        nxt = []
+        for a, b in pieces:
+            if c[1] <= a or c[0] >= b:
+                nxt.append((a, b))
+                continue
+            if c[0] > a:
+                nxt.append((a, c[0]))
+            if c[1] < b:
+                nxt.append((c[1], b))
+        pieces = nxt
+    good = [(a, b) for a, b in pieces if b - a >= MIN_PIECE]
+    return good or [(start, end)]
 
 
 @dataclass
@@ -115,14 +135,49 @@ class Clip:
     overlays: list[ImageOverlay] = field(default_factory=list)
     origin: str = "ai"              # "ai" = the app's guess, "user" = your pick (added by hand / from Summary)
     publish: dict = field(default_factory=dict)   # per-platform titles / captions / formats for 🚀 Publish
+    # ✂ Script editing: every word (file time), the stretches you cut, suggested cuts, jump-cut look
+    words: list = field(default_factory=list)       # [[start, end, word], ...]
+    cuts: list = field(default_factory=list)        # [[start, end], ...] removed, in file time
+    cut_suggestions: list = field(default_factory=list)   # [{start, end, kind, text}]
+    jump_cut: str = "punch"                         # "punch" = zoom in on every other piece, "hard" = plain
 
     @property
     def length(self) -> float:
         return max(0.1, self.end - self.start)
 
     @property
+    def kept(self) -> list[tuple[float, float]]:
+        """The stretches that are left after script cuts, in file time."""
+        return kept_ranges(self.start, self.end, self.cuts)
+
+    @property
+    def kept_length(self) -> float:
+        return max(0.1, sum(b - a for a, b in self.kept))
+
+    @property
     def out_length(self) -> float:
-        return self.length / max(0.25, self.speed)
+        return self.kept_length / max(0.25, self.speed)
+
+    def to_out(self, t: float) -> float:
+        """File time -> seconds into the exported clip (cuts and speed applied)."""
+        acc = 0.0
+        for a, b in self.kept:
+            if t < a:
+                break
+            acc += min(t, b) - a
+            if t <= b:
+                break
+        return acc / max(0.25, self.speed)
+
+    def to_file(self, t_out: float) -> float:
+        """Seconds into the exported clip -> file time."""
+        left = t_out * max(0.25, self.speed)
+        kept = self.kept
+        for a, b in kept:
+            if left <= b - a:
+                return a + left
+            left -= b - a
+        return kept[-1][1] if kept else self.end
 
 
 @dataclass
@@ -283,6 +338,35 @@ def build_clip_command(clip: Clip, settings: ExportSettings, out: str | Path, tm
 
     f: list[str] = []
     v: list[str] = []
+    # ✂ script cuts: keep only the kept pieces and stitch them together first
+    vin, ain = "[0:v]", "[0:a]"
+    kept = clip.kept
+    if clip.cuts and kept != [(clip.start, clip.end)]:
+        n = len(kept)
+        vs, as_ = [], []
+        for i, (a0, b0) in enumerate(kept):
+            ra, rb = a0 - clip.start, b0 - clip.start
+            if info.has_video:
+                size = f",scale={_even(info.width)}:{_even(info.height)}" if info.width and info.height else ""
+                punch = ""
+                if clip.jump_cut == "punch" and i % 2 == 1:
+                    punch = f",crop=trunc(iw/{PUNCH_IN}/2)*2:trunc(ih/{PUNCH_IN}/2)*2"
+                f.append(f"[0:v]trim=start={ra:.3f}:end={rb:.3f},setpts=PTS-STARTPTS{punch}{size},setsar=1[cv{i}]")
+                vs.append(f"[cv{i}]")
+            if info.has_audio:
+                fd = min(0.015, (rb - ra) / 4)
+                f.append(f"[0:a]atrim=start={ra:.3f}:end={rb:.3f},asetpts=PTS-STARTPTS,"
+                         f"afade=t=in:st=0:d={fd:.3f},afade=t=out:st={rb - ra - fd:.3f}:d={fd:.3f}[ca{i}]")
+                as_.append(f"[ca{i}]")
+        if info.has_video and info.has_audio:
+            f.append("".join(x + y for x, y in zip(vs, as_)) + f"concat=n={n}:v=1:a=1[cutv][cuta]")
+            vin, ain = "[cutv]", "[cuta]"
+        elif info.has_video:
+            f.append("".join(vs) + f"concat=n={n}:v=1:a=0[cutv]")
+            vin = "[cutv]"
+        elif info.has_audio:
+            f.append("".join(as_) + f"concat=n={n}:v=0:a=1[cuta]")
+            ain = "[cuta]"
     if not info.has_video:
         f.append(f"color=c=black:s={W}x{H}:r={settings.fps}:d={D:.3f}[base0]")
         cur = "[base0]"
@@ -299,17 +383,17 @@ def build_clip_command(clip: Clip, settings: ExportSettings, out: str | Path, tm
             v.append("vignette=PI/4.5")
         chain = ",".join(v) if v else "null"
         if mode == "9:16blur":
-            f.append(f"[0:v]{chain},split=2[bgsrc][fgsrc]")
+            f.append(f"{vin}{chain},split=2[bgsrc][fgsrc]")
             f.append(f"[bgsrc]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
                      f"boxblur=20:2,eq=brightness=-0.08[bg]")
             f.append(f"[fgsrc]scale={W}:-2[fg]")
             f.append(f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={settings.fps},setsar=1[base0]")
         elif mode in ("9:16", "1:1"):
             ar = "9/16" if mode == "9:16" else "1"
-            f.append(f"[0:v]{chain},crop='min(iw,ih*{ar})':'min(ih,iw/({ar}))',"
+            f.append(f"{vin}{chain},crop='min(iw,ih*{ar})':'min(ih,iw/({ar}))',"
                      f"scale={W}:{H},fps={settings.fps},setsar=1[base0]")
         else:
-            f.append(f"[0:v]{chain},scale={W}:{H}:force_original_aspect_ratio=decrease,"
+            f.append(f"{vin}{chain},scale={W}:{H}:force_original_aspect_ratio=decrease,"
                      f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,fps={settings.fps},setsar=1[base0]")
         cur = "[base0]"
 
@@ -386,7 +470,7 @@ def build_clip_command(clip: Clip, settings: ExportSettings, out: str | Path, tm
             fo = min(clip.fade_out, D / 3)
             a.append(f"afade=t=out:st={D - fo:.3f}:d={fo:.3f}")
         a.append(f"atrim=0:{D:.3f}")
-        f.append(f"[0:a]{','.join(a)}[aout]")
+        f.append(f"{ain}{','.join(a)}[aout]")
     else:
         f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{D:.3f}[aout]")
 

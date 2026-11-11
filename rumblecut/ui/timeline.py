@@ -442,6 +442,7 @@ class ClipTimeline(QWidget):
         self.time_fn = lambda t: t
         self.user = False
         self.end_fn = None         # stream time for an end point (defaults to time_fn)
+        self.cuts: list[tuple[float, float]] = []   # ✂ script cuts inside the moment (hatched)
         self._drag = None          # ("start" | "end" | "move", grab offset)
 
     # -- data
@@ -524,6 +525,21 @@ class ClipTimeline(QWidget):
         p.setPen(QPen(col, 1))
         p.drawLine(QPointF(xs, top), QPointF(xe, top))
         p.drawLine(QPointF(xs, bottom), QPointF(xe, bottom))
+        # script cuts: hatched, so you can see what's been taken out
+        for a, b in self.cuts:
+            x0, x1 = self._x(max(a, self.start)), self._x(min(b, self.end))
+            if x1 - x0 < 0.5:
+                continue
+            r_ = QRectF(x0, top, x1 - x0, h)
+            p.fillRect(r_, QColor(18, 20, 24, 200))
+            p.save()
+            p.setClipRect(r_)
+            p.setPen(QPen(QColor(239, 68, 68, 150), 1))
+            k = -h
+            while k < r_.width():
+                p.drawLine(QPointF(x0 + k, bottom), QPointF(x0 + k + h, top))
+                k += 6
+            p.restore()
         # handles
         for x in (xs, xe):
             p.setPen(Qt.NoPen)
@@ -538,7 +554,10 @@ class ClipTimeline(QWidget):
         p.drawText(QRectF(xs - 70, 2, 66, 16), Qt.AlignRight | Qt.AlignVCenter, fmt_time(self.time_fn(self.start)))
         p.drawText(QRectF(xe + 4, 2, 70, 16), Qt.AlignLeft | Qt.AlignVCenter, fmt_time((self.end_fn or self.time_fn)(self.end)))
         p.setPen(QColor("#9ca3af"))
-        p.drawText(QRectF(xs, 2, max(1, xe - xs), 16), Qt.AlignCenter, f"{self.end - self.start:.1f} s")
+        span = self.end - self.start
+        removed = sum(max(0.0, min(b, self.end) - max(a, self.start)) for a, b in self.cuts)
+        p.drawText(QRectF(xs, 2, max(1, xe - xs), 16), Qt.AlignCenter,
+                   f"{span:.1f} s → {span - removed:.1f} s after cuts" if removed > 0.05 else f"{span:.1f} s")
         # playhead
         if a <= self.playhead <= b:
             x = self._x(self.playhead)

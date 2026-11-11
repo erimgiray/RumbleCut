@@ -154,3 +154,54 @@ def transcribe(src: str, model_size: str | None = None, duration: float = 0.0,
                     continue
                 raise
     return []
+
+
+# words said in a stretch, with their own timings (for editing a clip by its script)
+Word = tuple[float, float, str]
+
+# a "verbatim" style hint: Whisper otherwise tends to leave out "um", "uh" and false starts
+VERBATIM_PROMPT = "Umm, so, uh, I- I mean, like, you know, hmm... Okay, uh, let me, let me think."
+
+
+def transcribe_words(src: str, start: float, end: float, model_size: str | None = None,
+                     on_progress: Callable[[float, str], None] | None = None,
+                     cancel: Callable[[], bool] | None = None) -> list[Word]:
+    """Every word between start and end, with start/end times in the source file's timeline."""
+    if not available():
+        raise RuntimeError("Speech recognition isn't included in this copy of RumbleCut. "
+                           "Install the latest version from Settings → Updates.")
+    model_size = model_size or config.load_settings().get("whisper_model", "small")
+    model = _load_model(model_size, on_progress)
+    with tempfile.TemporaryDirectory(prefix="rumblecut_asr_") as tmp:
+        wav = Path(tmp) / "audio.wav"
+        ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}",
+                "-t", f"{max(0.1, end - start):.3f}", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le", str(wav)], cancel=cancel)
+        audio = _read_wav(wav)
+        for attempt in (1, 2):
+            try:
+                segments, _ = model.transcribe(audio, word_timestamps=True, vad_filter=False, beam_size=1,
+                                               initial_prompt=VERBATIM_PROMPT, condition_on_previous_text=False)
+                out: list[Word] = []
+                total = max(0.1, end - start)
+                for seg in segments:
+                    if cancel and cancel():
+                        raise Cancelled()
+                    for w in (seg.words or []):
+                        txt = str(w.word).strip()
+                        if txt:
+                            out.append((float(w.start) + start, float(w.end) + start, txt))
+                    if on_progress:
+                        on_progress(min(1.0, seg.end / total), "Writing out every word…")
+                return out
+            except Cancelled:
+                raise
+            except Exception as e:
+                if attempt == 1 and _is_gpu_error(e):
+                    global _gpu_broken
+                    _gpu_broken = str(e)
+                    model = _load_model(model_size, on_progress, force_cpu=True)
+                    continue
+                raise
+    return []
+

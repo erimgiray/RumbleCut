@@ -196,6 +196,20 @@ Post moments to **YouTube, Instagram, TikTok and X** straight from RumbleCut.
 | TikTok | A draft in your TikTok inbox | Free; RumbleCut copies the caption, you paste it and press Post in TikTok (direct public posting needs TikTok to audit the app) |
 | X | A post with the video | Pay-per-use API credit, about $0.015 per post; videos up to 2:20 |
 
+## ✂ Cut words by script
+
+Trim a clip by editing its transcript, like a document: delete words in the text and they're cut from the video.
+
+1. In **🎬 Edit clips → ✂ Script** pick a moment (or press **✂ Cut words by script** in the Clip studio) and press **📝 Get the script**. Every word is written out with its own timing. Gaps show as **⏸ pauses** (blue) or **[… ]** (purple) where someone spoke but the speech-to-text left it out; that's usually an "um".
+2. **Select words and press Delete** to cut them; **Enter** brings them back; double-click a word to toggle it. **Ctrl+Z / Ctrl+Y** undo and redo.
+3. Let RumbleCut suggest cuts (amber, struck through), then **✓ Accept** or **✖ Keep** each one, or all at once:
+   - **🧹 Quick clean-up** (no AI): "um"/"uh", stutters and repeated words ("I I think"), pauses longer than 0.6 s (shortened to 0.25 s), and unscripted bits.
+   - **✨ Tighten with AI**: your AI marks asides, false starts, filler phrases and restated points, keeping the setup and the payoff (hover a suggestion to see why).
+4. **▶ Play the edit** plays the moment skipping everything cut, highlighting each word as it's said; click any word to play from there. Playing the clip in the Clip studio skips the cuts too, and the moment's timeline shows them hatched.
+5. **Jump cuts:** *punch-in zoom* (default) zooms in 8% on every other piece so cuts look like a camera change; *hard cut* just joins them. Cuts land at the quietest point between words, with a tiny audio fade, so nothing clicks.
+
+Context pictures stay on the words they belong to when you cut around them, and the export, Publish and preview all use the edited clip.
+
 ## Context images
 
 When the streamer mentions a person, place, organisation, event or thing, RumbleCut suggests a picture of it for that exact moment, like an editor adding B-roll. You approve every picture: only approved ones are exported.

@@ -58,6 +58,38 @@ def diagnose(out_path: str, with_asr: bool) -> int:
             return f"model loaded and ran, {len(transcribe.transcribe(p, 'tiny'))} segment(s) on a test tone"
         check("speech_to_text", asr)
 
+        def script_editing():
+            # real speech on Windows (built-in voice), word timings, clean-up suggestions, cut render
+            import tempfile, os, subprocess
+            from rumblecut import editor, ffmpeg_tools as ft, script_edit as se, transcribe
+            d = tempfile.mkdtemp()
+            wav = os.path.join(d, "speech.wav")
+            said = "So I I think the attack ad totally backfired. And then the the voters noticed."
+            if os.name == "nt":
+                ps = ("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                      f"$s.SetOutputToWaveFile('{wav}'); $s.Speak('{said}'); $s.Dispose()")
+                subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=120)
+            if not os.path.exists(wav):
+                ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        "sine=f=300:d=4", wav])
+            src = os.path.join(d, "talk.mp4")
+            ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=640x360:d=30", "-i", wav, "-shortest", "-c:v", "libx264", "-c:a", "aac", src])
+            dur = ft.MediaInfo(src).duration
+            words = transcribe.transcribe_words(src, 0.0, dur, "tiny")
+            c = editor.Clip(source=src, start=0.0, end=dur, words=[list(w) for w in words])
+            t, db = se.energy(src, 0.0, dur)
+            sugg = se.quick_cleanup(c, se.Quiet(t, db))
+            se.apply_cuts(c, [[x["start"], x["end"]] for x in sugg] or [[dur * 0.3, dur * 0.45]])
+            out = os.path.join(d, "cut.mp4")
+            editor.render_clip(c, editor.ExportSettings(height=360), out)
+            got = ft.MediaInfo(out).duration
+            if abs(got - c.out_length) > 0.35:
+                raise RuntimeError(f"cut render is {got:.2f}s, expected {c.out_length:.2f}s")
+            return (f"{len(words)} words: {' '.join(w for _, _, w in words)[:90]!r}; suggestions: "
+                    f"{[x['kind'] + ':' + x['text'][:12] for x in sugg]}; {dur:.1f}s -> {got:.1f}s rendered")
+        check("script_editing", script_editing)
+
         def context_images():
             # live: Wikimedia search + download, then render both looks with the bundled ffmpeg
             import tempfile, os

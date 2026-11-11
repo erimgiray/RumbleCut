@@ -110,12 +110,8 @@ class ContextImagesTab(QWidget):
         s = config.load_settings()
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(16, 12, 16, 12)
+        v.setContentsMargins(0, 8, 0, 0)
         v.setSpacing(8)
-
-        head = QLabel("🖼  Context pictures")
-        head.setObjectName("h2")
-        v.addWidget(head)
 
         # ---- moment + find
         top = QHBoxLayout()
