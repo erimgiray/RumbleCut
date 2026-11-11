@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QScrollBar, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
     QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -1072,7 +1072,18 @@ class MainWindow(QMainWindow):
         self.timeline.setToolTip("")
         trow = QHBoxLayout()
         trow.setSpacing(4)
-        trow.addWidget(self.timeline, 1)
+        tcol = QVBoxLayout()
+        tcol.setSpacing(4)
+        tcol.addWidget(self.timeline)
+        # when zoomed in: a scroll bar under the timeline to move along the stream
+        self.tl_scroll = QScrollBar(Qt.Horizontal)
+        self.tl_scroll.setObjectName("tlscroll")
+        self.tl_scroll.setToolTip("Drag to move along the stream · click either side to jump a screen")
+        self.tl_scroll.setCursor(Qt.PointingHandCursor)
+        self.tl_scroll.hide()
+        self.tl_scroll.valueChanged.connect(self._tl_scrolled)
+        tcol.addWidget(self.tl_scroll)
+        trow.addLayout(tcol, 1)
         zcol = QVBoxLayout()
         zcol.setSpacing(3)
         self.btn_zoom_in = QToolButton(); self.btn_zoom_in.setText("＋")
@@ -1102,6 +1113,17 @@ class MainWindow(QMainWindow):
             self.btn_zoom_fit.setEnabled(z > 1.001)
             self.btn_zoom_in.setEnabled(self.timeline.duration > 0 and
                                         self.timeline.view[1] - self.timeline.view[0] > self.timeline.MAX_ZOOM_SPAN + 0.01)
+            # keep the scroll bar in step with what the timeline shows
+            a, b = self.timeline.view
+            span, dur = b - a, self.timeline.duration
+            sb = self.tl_scroll
+            sb.blockSignals(True)
+            sb.setVisible(z > 1.001)
+            sb.setRange(0, max(0, int((dur - span) * 1000)))
+            sb.setPageStep(max(1, int(span * 1000)))
+            sb.setSingleStep(max(1, int(span * 100)))         # arrow keys / small steps: a tenth of a screen
+            sb.setValue(int(a * 1000))
+            sb.blockSignals(False)
         self.timeline.zoom_changed.connect(zoom_changed)
         zoom_changed(1.0)
 
@@ -2658,6 +2680,11 @@ class MainWindow(QMainWindow):
         w.finished.connect(lambda: (row["connect"].setEnabled(True), self._pub_status(plat)))
         self._start(w)
 
+    def _tl_scrolled(self, v: int):
+        a, b = self.timeline.view
+        span = b - a
+        self.timeline.set_view(v / 1000, v / 1000 + span)
+
     def _build_context_tab(self) -> QWidget:
         from .context_tab import ContextImagesTab
         self.ctx_tab = ContextImagesTab(self)
@@ -3554,6 +3581,11 @@ QFrame#banner QLabel, QFrame#banner QCheckBox {{ background: transparent; }}
 QToolButton#hamburgerBtn {{ padding: 0; border: none; background: transparent; }}
 QToolButton#hamburgerBtn:hover {{ background: #2a2e36; border-radius: 6px; }}
 QToolButton#hamburgerBtn::menu-indicator {{ image: none; width: 0; }}
+QScrollBar#tlscroll:horizontal {{ height: 20px; background: #15171c; border: 1px solid #262a31; border-radius: 10px; margin: 0; }}
+QScrollBar#tlscroll::handle:horizontal {{ background: #4b5260; border-radius: 7px; min-width: 56px; margin: 2px; }}
+QScrollBar#tlscroll::handle:horizontal:hover {{ background: #6b7280; }}
+QScrollBar#tlscroll::handle:horizontal:pressed {{ background: {ACCENT}; }}
+QScrollBar#tlscroll::add-page:horizontal, QScrollBar#tlscroll::sub-page:horizontal {{ background: none; }}
 QToolButton#zoomBtn {{ padding: 0; font-size: 11pt; }}
 QToolButton#zoomBtn:disabled {{ color: #4b5260; background: #20232a; }}
 QPushButton#more {{ background: #20242b; border: 1px dashed #4b5260; padding: 9px; color: #cbd5e1; }}

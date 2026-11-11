@@ -229,13 +229,6 @@ class Timeline(QWidget):
             p.setPen(QPen(QColor("#ffffff"), 2))
             p.drawLine(QPointF(x, top - 4), QPointF(x, bottom))
         p.restore()
-        # when zoomed in: a mini-map along the very top showing which part you're looking at
-        if self.zoom > 1.001:
-            full = self.width() - 16
-            x0 = 8 + full * va / self.duration
-            x1 = 8 + full * vb / self.duration
-            p.fillRect(QRectF(8, 0, full, 3), QColor("#262a31"))
-            p.fillRect(QRectF(x0, 0, max(3, x1 - x0), 3), QColor(ACCENT))
 
     def _clip_at(self, x: float):
         """(index, what) under x: the selected moment's edges first, then the selected moment (it's on
