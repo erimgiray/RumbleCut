@@ -451,7 +451,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_studio_tab(), _num_icon(2), "Clip studio")
         self.tabs.addTab(self._build_export_tab(), _num_icon(3), "Export")
         self.tabs.setIconSize(QSize(26, 26))
-        self.ctx_index = self.tabs.addTab(self._build_context_tab(), "✨  Context images")
+        self.ctx_index = self.tabs.addTab(self._build_context_tab(), "🎬  Edit clips")
+        from .publish_tab import PublishTab
+        self.pub_tab = PublishTab(self)
+        self.pub_index = self.tabs.addTab(self.pub_tab, "🚀  Publish")
         _sc = QScrollArea()
         self._settings_scroll = _sc
         _sc.setWidgetResizable(True)
@@ -459,6 +462,7 @@ class MainWindow(QMainWindow):
         self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and self.ctx_tab.refresh())
+        self.tabs.currentChanged.connect(lambda i: i == self.pub_index and self.pub_tab.refresh())
         self._build_menu()
         self._update_no_video("")
         from PySide6.QtWidgets import QAbstractSpinBox
@@ -1349,7 +1353,7 @@ class MainWindow(QMainWindow):
         b2 = QPushButton("✖"); b2.setMaximumWidth(36); b2.clicked.connect(self.remove_overlay)
         self.btn_auto_img = QPushButton("✨ Find pictures")
         self.btn_auto_img.setToolTip("Suggest pictures for what's said in this moment - you review them in the "
-                                     "✨ Context images tab")
+                                     "🎬 Edit clips tab")
         self.btn_auto_img.clicked.connect(self.find_pictures_for_current)
         orow.addWidget(b); orow.addWidget(b2); orow.addWidget(self.btn_auto_img)
         gl.addLayout(orow)
@@ -2597,6 +2601,63 @@ class MainWindow(QMainWindow):
         self._start(w)
 
     # ------------------------------------------------------------------ tab 4: context images
+    # ---- publishing accounts
+    def _pub_status(self, plat):
+        from .. import publish as pb
+        row = self.pub_rows[plat]
+        if pb.is_connected(plat):
+            row["status"].setText(f"✔ Connected as {pb.account_name(plat)}")
+            row["connect"].setText("Reconnect")
+            row["disconnect"].setEnabled(True)
+        else:
+            cid, _ = pb.get_credentials(plat)
+            row["status"].setText("Keys saved - press Connect to sign in" if cid else "Not set up yet")
+            row["connect"].setText("Connect")
+            row["disconnect"].setEnabled(False)
+        if hasattr(self, "pub_tab"):
+            for c in self.pub_tab.cards.values():
+                c.refresh_status()
+
+    def _pub_steps(self, plat):
+        from .. import publish as pb
+        info = pb.SETUP[plat]
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Set up {pb.PLATFORMS[plat]}")
+        box.setTextFormat(Qt.RichText)
+        box.setText(f"<b>{pb.PLATFORMS[plat]} - one-time setup</b><ol>"
+                    + "".join(f"<li style='margin-bottom:6px'>{st}</li>" for st in info["steps"]) + "</ol>")
+        open_btn = box.addButton("Open the developer site", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl(info["link"]))
+
+    def _pub_connect(self, plat):
+        from .. import publish as pb
+        row = self.pub_rows[plat]
+        cid = row["id"].text().strip()
+        sec = row["secret"].text().strip() or pb.get_credentials(plat)[1]
+        if not cid:
+            QMessageBox.information(self, "Publishing accounts",
+                                    f"Paste your {pb.SETUP[plat]['id_label']} first (see “Setup steps”).")
+            return
+        pb.set_credentials(plat, cid, sec)
+        row["secret"].clear()
+        row["secret"].setPlaceholderText("•••••••• saved" if sec else pb.SETUP[plat]["secret_label"])
+        row["status"].setText("Waiting for you to sign in in your browser…")
+        row["connect"].setEnabled(False)
+        w = Worker(lambda on_progress=None, cancel=None: pb.connect(plat, cancel=cancel))
+
+        def done(name):
+            self._show_toast(f"✔ {pb.PLATFORMS[plat]} connected as {name}")
+
+        def failed(msg):
+            QMessageBox.warning(self, "Publishing accounts", f"{pb.PLATFORMS[plat]}: {msg}")
+        w.done.connect(done)
+        w.failed.connect(failed)
+        w.finished.connect(lambda: (row["connect"].setEnabled(True), self._pub_status(plat)))
+        self._start(w)
+
     def _build_context_tab(self) -> QWidget:
         from .context_tab import ContextImagesTab
         self.ctx_tab = ContextImagesTab(self)
@@ -2888,6 +2949,60 @@ class MainWindow(QMainWindow):
             kf.addRow(label, row)
             self.ctx_key_edits[prov] = e
         left.addWidget(gk)
+
+        # ---- publishing accounts (your own free developer apps)
+        from .. import publish as pb
+        gp = QGroupBox("Publishing accounts")
+        self.pub_accounts_group = gp
+        pv = QVBoxLayout(gp)
+        ph = QLabel("RumbleCut posts through your own free developer app on each platform - set each one up "
+                    "once (press “Setup steps”), paste its keys here and press Connect to sign in. "
+                    f"Use this redirect / callback address everywhere it's asked for:")
+        ph.setObjectName("muted")
+        ph.setWordWrap(True)
+        pv.addWidget(ph)
+        rr = QHBoxLayout()
+        ru = QLineEdit(pb.REDIRECT_URI)
+        ru.setReadOnly(True)
+        rc = QPushButton("Copy")
+        rc.clicked.connect(lambda: QApplication.clipboard().setText(pb.REDIRECT_URI))
+        rr.addWidget(ru, 1)
+        rr.addWidget(rc)
+        pv.addLayout(rr)
+        self.pub_rows = {}
+        for plat, name in pb.PLATFORMS.items():
+            info = pb.SETUP[plat]
+            box = QGroupBox(name)
+            bf = QFormLayout(box)
+            cid, sec = pb.get_credentials(plat)
+            e_id = QLineEdit(cid)
+            e_id.setPlaceholderText(info["id_label"])
+            e_sec = QLineEdit()
+            e_sec.setEchoMode(QLineEdit.Password)
+            e_sec.setPlaceholderText("•••••••• saved" if sec else info["secret_label"])
+            st = QLabel("")
+            st.setObjectName("muted")
+            st.setWordWrap(True)
+            b_steps = QPushButton("Setup steps")
+            b_conn = QPushButton("Connect")
+            b_conn.setObjectName("primary")
+            b_disc = QPushButton("Disconnect")
+            brow = QHBoxLayout()
+            for b in (b_steps, b_conn, b_disc):
+                brow.addWidget(b)
+            brow.addStretch()
+            bf.addRow(info["id_label"], e_id)
+            bf.addRow(info["secret_label"], e_sec)
+            bf.addRow("", brow)
+            bf.addRow("", st)
+            row = {"id": e_id, "secret": e_sec, "status": st, "connect": b_conn, "disconnect": b_disc}
+            self.pub_rows[plat] = row
+            b_steps.clicked.connect(lambda _=False, p=plat: self._pub_steps(p))
+            b_conn.clicked.connect(lambda _=False, p=plat: self._pub_connect(p))
+            b_disc.clicked.connect(lambda _=False, p=plat: (pb.disconnect(p), self._pub_status(p)))
+            self._pub_status(plat)
+            pv.addWidget(box)
+        left.addWidget(gp)
 
         def mode_changed():
             local = self.ai_local.isChecked()

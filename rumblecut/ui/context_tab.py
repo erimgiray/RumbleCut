@@ -1,4 +1,4 @@
-"""✨ Context images tab: find pictures for what's being said, then review them.
+"""🎬 Edit clips tab - context pictures: find pictures for what's being said, then review them.
 
 For the moment you pick, RumbleCut transcribes it, asks your AI what's worth showing, and fetches
 pictures from the sources you allow. Each suggestion waits for your approval: swap it for another
@@ -112,6 +112,10 @@ class ContextImagesTab(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(16, 12, 16, 12)
         v.setSpacing(8)
+
+        head = QLabel("🖼  Context pictures")
+        head.setObjectName("h2")
+        v.addWidget(head)
 
         # ---- moment + find
         top = QHBoxLayout()

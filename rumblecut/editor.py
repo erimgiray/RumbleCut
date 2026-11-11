@@ -114,6 +114,7 @@ class Clip:
                                     # just for this moment after an audio-first scan)
     overlays: list[ImageOverlay] = field(default_factory=list)
     origin: str = "ai"              # "ai" = the app's guess, "user" = your pick (added by hand / from Summary)
+    publish: dict = field(default_factory=dict)   # per-platform titles / captions / formats for 🚀 Publish
 
     @property
     def length(self) -> float:

@@ -104,7 +104,7 @@ Encoding uses the **NVIDIA GPU (NVENC)** automatically when one is present. You 
 
 Projects can be saved and reopened later (`.rcproj`), including the AI's Summary and your picks. **File** and **Help** live in the **☰** menu at the left of the tabs; the keyboard shortcuts (Ctrl+O, Ctrl+S…) still work.
 
-**✨ Context images:** pictures that match what's being said - see [Context images](#context-images) below.
+**🎬 Edit clips:** context pictures that match what's being said - see [Context images](#context-images) below.
 
 **⚙ Settings**
 - Folders, GPU encoding and the speech model. Changes save automatically.
@@ -180,11 +180,27 @@ rumblecut/
 tests/test_engine.py        end-to-end check on a synthetic stream:  python -m tests.test_engine
 ```
 
+## 🚀 Publish
+
+Post moments to **YouTube, Instagram, TikTok and X** straight from RumbleCut.
+
+1. **Set up each platform once** in *Settings → Publishing accounts*: press **Setup steps** for that platform, create your own free developer app (the steps link straight to the right page), paste its keys, and press **Connect** to sign in in your browser. The redirect / callback address to give each platform is shown there: `http://localhost:47123/callback/`. Logins are stored encrypted for your Windows account and refresh themselves.
+2. In the **🚀 Publish** tab, pick a moment and tick the platforms. **✨ Write titles, captions & hashtags with AI** (or **Write posts for all ticked**) drafts a post per platform from what's said in the clip; edit anything.
+3. **Shape:** TikTok, Instagram and YouTube clips up to 3 minutes default to **vertical 9:16** (a Short / Reel); X and longer YouTube videos keep the original shape. Change it per platform. Effects and approved pictures are included.
+4. **🚀 Post this moment** or **Post all ticked moments**, now or **scheduled**: YouTube schedules the video itself; the others are posted by a Windows scheduled task at that time (RumbleCut can be closed, the PC must be on). Results and links appear under *Posted and scheduled* (double-click to open; select a scheduled one to cancel it).
+
+| Platform | How it posts | Notes |
+|---|---|---|
+| YouTube | Straight to your channel | Free; public, unlisted or private; up to 100 uploads a day |
+| Instagram | A Reel on your profile | Free; needs a Creator/Business account linked to a Facebook Page (switching is free) |
+| TikTok | A draft in your TikTok inbox | Free; RumbleCut copies the caption, you paste it and press Post in TikTok (direct public posting needs TikTok to audit the app) |
+| X | A post with the video | Pay-per-use API credit, about $0.015 per post; videos up to 2:20 |
+
 ## Context images
 
 When the streamer mentions a person, place, organisation, event or thing, RumbleCut suggests a picture of it for that exact moment, like an editor adding B-roll. You approve every picture: only approved ones are exported.
 
-1. Pick a moment in the **✨ Context images** tab (or press **✨ Find pictures** in the Clip studio's *Images on screen*) and press **✨ Find pictures for this moment**, or **Find for all ticked moments**.
+1. Pick a moment in the **🎬 Edit clips** tab (or press **✨ Find pictures** in the Clip studio's *Images on screen*) and press **✨ Find pictures for this moment**, or **Find for all ticked moments**.
 2. RumbleCut transcribes the moment, your AI (Settings → AI models) picks what's worth showing and when (without an AI, names in the transcript are used), and pictures are fetched from the sources you tick:
    - **Wikipedia / Wikimedia**: Wikipedia article pictures and Wikimedia Commons. Free to reuse with credit, no key needed. Best for people, places, organisations and events.
    - **Pexels stock photos**: free stock photos for general things (money, crowds, oil rigs). Needs a free API key.

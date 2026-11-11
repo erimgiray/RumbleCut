@@ -44,6 +44,9 @@ def diagnose(out_path: str, with_asr: bool) -> int:
     check("voice_analysis", voice_check)
     check("diction", lambda: len(__import__("rumblecut.diction", fromlist=["x"]).lexicon_spans(
         [(0.0, 3.0, "No way, that is insane! Ha ha ha")])) == 1 and "word list ok")
+    check("publish", lambda: (lambda pb: f"{', '.join(pb.PLATFORMS.values())} via {pb.REDIRECT_URI}")(
+        __import__("rumblecut.publish", fromlist=["x"])))
+    check("publish_tab", lambda: __import__("rumblecut.ui.publish_tab", fromlist=["x"]) and "ok")
     if with_asr:
         def asr():
             import tempfile, os
@@ -98,5 +101,18 @@ if __name__ == "__main__":
     if "--diagnose" in sys.argv:
         i = sys.argv.index("--diagnose")
         sys.exit(diagnose(sys.argv[i + 1] if len(sys.argv) > i + 1 else "diagnose.json", "--asr" in sys.argv))
+    if "--publish-due" in sys.argv:          # started by Windows at a scheduled post's time
+        from datetime import datetime
+        from rumblecut import config, publish
+        logf = config.app_data_dir() / "publish.log"
+
+        def log(line):
+            with open(logf, "a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {line}\n")
+        try:
+            publish.run_due(on_log=log)
+        except Exception as e:
+            log(f"failed: {e}")
+        sys.exit(0)
     from rumblecut.ui.main_window import run_app
     sys.exit(run_app())
