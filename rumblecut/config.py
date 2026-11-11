@@ -28,6 +28,12 @@ DEFAULTS = {
     "local_url": "",
     "local_model": "",
     "cloud_model": "",
+    # context images
+    "ctx_sources": ["wikimedia"],       # wikimedia | pexels | web
+    "ctx_per_clip": 4,                  # suggestions per moment
+    "ctx_gap": 6,                       # seconds between pictures
+    "ctx_show_for": 4,                  # default seconds on screen
+    "ctx_style": "corner",              # default look for new suggestions
 }
 
 

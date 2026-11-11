@@ -1,4 +1,4 @@
-"""Main window: Get Video → Clip Studio → Export, plus the Context Images (coming soon) tab."""
+"""Main window: Get Video → Clip Studio → Export, plus the Context Images tab."""
 from __future__ import annotations
 
 import os
@@ -451,12 +451,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_studio_tab(), _num_icon(2), "Clip studio")
         self.tabs.addTab(self._build_export_tab(), _num_icon(3), "Export")
         self.tabs.setIconSize(QSize(26, 26))
-        self.tabs.addTab(self._build_context_tab(), "✨  Context images  (coming soon)")
+        self.ctx_index = self.tabs.addTab(self._build_context_tab(), "✨  Context images")
         _sc = QScrollArea()
+        self._settings_scroll = _sc
         _sc.setWidgetResizable(True)
         _sc.setWidget(self._build_settings_tab())
         self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
+        self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and self.ctx_tab.refresh())
         self._build_menu()
         self._update_no_video("")
         from PySide6.QtWidgets import QAbstractSpinBox
@@ -1345,8 +1347,10 @@ class MainWindow(QMainWindow):
         orow = QHBoxLayout()
         b = QPushButton("＋ Image at playhead"); b.clicked.connect(self.add_overlay)
         b2 = QPushButton("✖"); b2.setMaximumWidth(36); b2.clicked.connect(self.remove_overlay)
-        self.btn_auto_img = QPushButton("✨ Auto"); self.btn_auto_img.setEnabled(False)
-        self.btn_auto_img.setToolTip("Context Images - coming soon")
+        self.btn_auto_img = QPushButton("✨ Find pictures")
+        self.btn_auto_img.setToolTip("Suggest pictures for what's said in this moment - you review them in the "
+                                     "✨ Context images tab")
+        self.btn_auto_img.clicked.connect(self.find_pictures_for_current)
         orow.addWidget(b); orow.addWidget(b2); orow.addWidget(self.btn_auto_img)
         gl.addLayout(orow)
         of = QFormLayout()
@@ -2121,7 +2125,7 @@ class MainWindow(QMainWindow):
         self.i_ovl.blockSignals(True)
         self.i_ovl.clear()
         for o in (c.overlays if c else []):
-            self.i_ovl.addItem(f"{Path(o.image).name}  @ {o.start:.1f}s  ({o.position})")
+            self.i_ovl.addItem(self._ov_text(o))
         self.i_ovl.blockSignals(False)
         has = bool(c and c.overlays)
         for w in (self.o_pos, self.o_start, self.o_dur, self.o_scale):
@@ -2150,7 +2154,14 @@ class MainWindow(QMainWindow):
         if c and 0 <= r < len(c.overlays):
             setattr(c.overlays[r], attr, val)
             o = c.overlays[r]
-            self.i_ovl.item(r).setText(f"{Path(o.image).name}  @ {o.start:.1f}s  ({o.position})")
+            self.i_ovl.item(r).setText(self._ov_text(o))
+
+    @staticmethod
+    def _ov_text(o) -> str:
+        name = o.label or Path(o.image).name
+        look = "full screen" if o.style == "full" else o.position
+        state = "⏳ " if o.status == "pending" else ""
+        return f"{state}{name}  @ {o.start:.1f}s  ({look})"
 
     def add_overlay(self):
         c = self.current_clip()
@@ -2587,48 +2598,27 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ tab 4: context images
     def _build_context_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(40, 30, 40, 30)
-        badge = QLabel("COMING SOON")
-        badge.setObjectName("badge")
-        badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
-        v.addWidget(badge)
-        t = QLabel("Context images: pictures that match what's being said")
-        t.setObjectName("h1")
-        v.addWidget(t)
-        d = QLabel(
-            "When the streamer mentions a person, place, product, headline or chart, RumbleCut will pop a "
-            "relevant image onto the clip at exactly that moment - like an editor adding B-roll.<br><br>"
-            "<b>How it will work</b><br>"
-            "1. <b>Listen</b> - the clip's speech is transcribed with word-level timing (runs on your GPU).<br>"
-            "2. <b>Understand</b> - the key topics and names are pulled out of each sentence by the AI model "
-            "you choose in Settings → AI models (on this PC or cloud).<br>"
-            "3. <b>Find</b> - matching pictures are fetched from the sources you allow (your own image folder, "
-            "free-licence libraries, or a search provider with your API key).<br>"
-            "4. <b>Place</b> - images are timed to the words, spaced out so they never clutter, and "
-            "animated in and out.<br>"
-            "5. <b>Review</b> - every suggestion appears in the clip's “Images on screen” list, where you can "
-            "swap, move, resize or delete it before exporting.<br><br>"
-            "The rendering half is already built: you can add images to any clip by hand today in the "
-            "Clip studio (“＋ Image at playhead”), and they export with fades and borders.")
-        d.setWordWrap(True)
-        d.setTextFormat(Qt.RichText)
-        v.addWidget(d)
-        g = QGroupBox("Settings (available when the feature ships)")
-        g.setEnabled(False)
-        fl = QFormLayout(g)
-        src = QComboBox(); src.addItems(["My image folder", "Wikimedia Commons (free licence)", "Pexels (API key)",
-                                         "Web image search (API key)"])
-        fl.addRow("Image sources", src)
-        dens = QComboBox(); dens.addItems(["Light (1 image per ~15 s)", "Medium (per ~8 s)", "Heavy (per ~5 s)"])
-        fl.addRow("How often", dens)
-        pos = QComboBox(); pos.addItems(editor.OVERLAY_POSITIONS)
-        fl.addRow("Default position", pos)
-        fl.addRow("", QPushButton("✨ Add context images to all ticked clips"))
-        v.addWidget(g)
-        v.addStretch()
-        return w
+        from .context_tab import ContextImagesTab
+        self.ctx_tab = ContextImagesTab(self)
+        return self.ctx_tab
+
+    def _ai_log_line(self, line: str):
+        self._log(line)
+
+    def _overlays_changed(self):
+        """A picture was added, approved, swapped or removed in the Context images tab."""
+        c = self.current_clip()
+        if c is not None:
+            self._fill_overlays()
+
+    def find_pictures_for_current(self):
+        c = self.current_clip()
+        if not c:
+            return
+        self.tabs.setCurrentIndex(self.ctx_index)
+        self.ctx_tab.select_clip(c)
+        if not any(o.status == "pending" for o in c.overlays):
+            self.ctx_tab.find(all_ticked=False)
 
     # ------------------------------------------------------------------ projects / settings
     def save_project(self, as_new=False):
@@ -2852,11 +2842,52 @@ class MainWindow(QMainWindow):
         trow.addWidget(self.ai_test_btn)
         trow.addWidget(self.ai_test_label, 1)
         av.addLayout(trow)
-        hint = QLabel("Used for ✨ AI clip titles & captions now, and for Context Images when it ships.")
+        hint = QLabel("Used for ✨ AI clip titles & captions, finding highlights, and choosing context images.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         av.addWidget(hint)
         left.addWidget(gai)
+
+        # ---- context images: API keys for the picture sources that need one
+        from .. import context_images as ci
+        gk = QGroupBox("Context images")
+        self.ctx_keys_group = gk
+        kf = QFormLayout(gk)
+        kh = QLabel("Wikipedia / Wikimedia needs no key. Pexels (free stock photos) and web image search "
+                    "(Brave) need your own API key. Keys are stored encrypted for your Windows account.")
+        kh.setObjectName("muted")
+        kh.setWordWrap(True)
+        kf.addRow(kh)
+        self.ctx_key_edits = {}
+        for prov, label, link, hint_txt in (
+                ("pexels", "Pexels key", "https://www.pexels.com/api/", "free key from pexels.com/api"),
+                ("web", "Brave Search key", "https://api-dashboard.search.brave.com/",
+                 "key from the Brave Search API dashboard")):
+            row = QHBoxLayout()
+            e = QLineEdit()
+            e.setEchoMode(QLineEdit.Password)
+            e.setPlaceholderText("•••••••• saved (paste a new key to replace)" if ci.get_key(prov) else hint_txt)
+            bs = QPushButton("Save")
+            bg = QPushButton("Get a key")
+            bg.setObjectName("link")
+            bg.clicked.connect(lambda _=False, u=link: QDesktopServices.openUrl(QUrl(u)))
+            st = QLabel("✔ saved" if ci.get_key(prov) else "")
+            st.setObjectName("muted")
+
+            def save(_=False, prov=prov, e=e, st=st):
+                ci.set_key(prov, e.text())
+                e.clear()
+                has = bool(ci.get_key(prov))
+                e.setPlaceholderText("•••••••• saved (paste a new key to replace)" if has else "")
+                st.setText("✔ saved" if has else "removed")
+                if hasattr(self, "ctx_tab"):
+                    self.ctx_tab._update_source_hints()
+            bs.clicked.connect(save)
+            e.returnPressed.connect(save)
+            row.addWidget(e, 1); row.addWidget(bs); row.addWidget(bg); row.addWidget(st)
+            kf.addRow(label, row)
+            self.ctx_key_edits[prov] = e
+        left.addWidget(gk)
 
         def mode_changed():
             local = self.ai_local.isChecked()
@@ -3358,6 +3389,8 @@ QLabel#h1 {{ font-size: 17pt; font-weight: 600; }}
 QLabel#h2 {{ font-size: 11pt; font-weight: 600; }}
 QLabel#section {{ font-weight: 600; color: #cbd5e1; padding: 4px 0; }}
 QLabel#muted {{ color: #8b95a3; }}
+QPushButton#link {{ background: transparent; border: none; color: {ACCENT}; padding: 4px 6px; text-decoration: underline; }}
+QPushButton#link:hover {{ color: #a6dc6f; }}
 QLabel#badge {{ background: {ACCENT}; color: #0b0d10; font-weight: 700; padding: 3px 10px; border-radius: 9px; }}
 QTabWidget::tab-bar {{ left: 48px; }}
 QTabWidget#lefttabs::tab-bar {{ left: 0; }}

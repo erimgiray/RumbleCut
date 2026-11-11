@@ -103,7 +103,7 @@ Encoding uses the **NVIDIA GPU (NVENC)** automatically when one is present. You 
 
 Projects can be saved and reopened later (`.rcproj`), including the AI's Summary and your picks. **File** and **Help** live in the **☰** menu at the left of the tabs; the keyboard shortcuts (Ctrl+O, Ctrl+S…) still work.
 
-**✨ Context images:** coming soon (see below).
+**✨ Context images:** pictures that match what's being said - see [Context images](#context-images) below.
 
 **⚙ Settings**
 - Folders, GPU encoding and the speech model. Changes save automatically.
@@ -168,7 +168,7 @@ rumblecut/
   diction.py                what's said: AI reads the transcript and rates passages; offline word list
   transcribe.py             optional faster-whisper speech-to-text (GPU when available)
   editor.py                 Clip / Project model, effects, aspect ratios, overlays, transitions, batch export
-  context_images.py         interfaces for the upcoming Context Images feature
+  context_images.py         Context images: topics, picture sources, downloads, credits
   ai.py                     one switch for AI: local (Ollama / OpenAI-compatible) or cloud (Claude)
   ffmpeg_tools.py           finds the bundled ffmpeg, runs jobs with progress and cancel, NVENC detection
   config.py                 settings in %APPDATA%\RumbleCut
@@ -179,22 +179,25 @@ rumblecut/
 tests/test_engine.py        end-to-end check on a synthetic stream:  python -m tests.test_engine
 ```
 
-## Coming feature: Context Images
+## Context images
 
-The goal is to automatically show a relevant picture whenever the streamer talks about something (a person, a place, a headline or a product), the way a video editor adds B-roll.
+When the streamer mentions a person, place, organisation, event or thing, RumbleCut suggests a picture of it for that exact moment, like an editor adding B-roll. You approve every picture: only approved ones are exported.
 
-```
-clip audio → transcribe (word timings) → TopicExtractor → ImageProvider(s) → ContextImagePlanner → ImageOverlay → export
-```
+1. Pick a moment in the **✨ Context images** tab (or press **✨ Find pictures** in the Clip studio's *Images on screen*) and press **✨ Find pictures for this moment**, or **Find for all ticked moments**.
+2. RumbleCut transcribes the moment, your AI (Settings → AI models) picks what's worth showing and when (without an AI, names in the transcript are used), and pictures are fetched from the sources you tick:
+   - **Wikipedia / Wikimedia**: Wikipedia article pictures and Wikimedia Commons. Free to reuse with credit, no key needed. Best for people, places, organisations and events.
+   - **Pexels stock photos**: free stock photos for general things (money, crowds, oil rigs). Needs a free API key.
+   - **Web image search (Brave)**: the widest coverage, but most results are copyrighted, so check before you publish. Needs a Brave Search API key (monthly free credit, about 1,000 searches).
+   - Add keys in *Settings → Context images*. They're stored encrypted for your Windows account.
+3. Review each suggestion (gold = to review, green = approved):
+   - see it over the clip's frame, exactly as it will look;
+   - click another picture in the strip to swap, or **🔍 Search again** with your own words;
+   - choose the **Look**: *Corner pop-up* (pick the corner and size, optionally with the name in a strip under it) or *Full-screen cutaway* (fills the frame with a slow zoom);
+   - set when it **Appears** and how long it **Shows**;
+   - **✓ Approve**, **✖ Remove**, or **Approve all** for the moment.
+4. Export as usual. A **picture credits.txt** is saved next to the clips: author, licence and link for every picture, ready to paste into the description.
 
-- **Already done:**
-  - the rendering side (`ImageOverlay`: timed, positioned, faded, bordered). You can use it by hand today with *＋ Image at playhead*.
-  - the plug-in interfaces in `context_images.py`, with a working offline topic extractor and a "my image folder" provider.
-- **Still to do:**
-  - an online provider (Wikimedia Commons / Pexels / search API)
-  - an LLM topic extractor, for better topics than the keyword heuristic
-  - the tab's settings UI
-  - a review step where suggestions appear in each clip's image list before export
+Finding pictures again replaces only the suggestions you haven't approved; approved pictures and ones you added by hand stay.
 
 ---
 

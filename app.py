@@ -54,6 +54,29 @@ def diagnose(out_path: str, with_asr: bool) -> int:
                     "sine=f=300:d=3", "-c:a", "aac", p])
             return f"model loaded and ran, {len(transcribe.transcribe(p, 'tiny'))} segment(s) on a test tone"
         check("speech_to_text", asr)
+
+        def context_images():
+            # live: Wikimedia search + download, then render both looks with the bundled ffmpeg
+            import tempfile, os
+            from rumblecut import context_images as ci, editor, ffmpeg_tools as ft
+            cands = ci.search_topic(ci.Topic("Strait of Hormuz", 0, 3, kind="place"), ["wikimedia"])
+            if not cands:
+                raise RuntimeError("Wikimedia returned no pictures")
+            img = ci.download(cands[0].path_or_url)
+            d = tempfile.mkdtemp()
+            src = os.path.join(d, "src.mp4")
+            ft.run([ft.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=640x360:d=4", "-f", "lavfi", "-i", "sine=d=4", "-shortest",
+                    "-c:v", "libx264", "-c:a", "aac", src])
+            c = editor.Clip(source=src, start=0, end=4, overlays=[
+                editor.ImageOverlay(image=img, start=0.2, duration=1.5, label="Strait of Hormuz", show_label=True),
+                editor.ImageOverlay(image=img, start=2.0, duration=1.5, style="full")])
+            out = os.path.join(d, "out.mp4")
+            editor.render_clip(c, editor.ExportSettings(height=360), out)
+            return (f"{len(cands)} pictures; first: {cands[0].title} by {cands[0].credit} ({cands[0].licence}), "
+                    f"{os.path.getsize(img) // 1024} KB {os.path.splitext(img)[1]}; render ok "
+                    f"{os.path.getsize(out) // 1024} KB")
+        check("context_images", context_images)
     report["all_ok"] = ok
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, default=str)
