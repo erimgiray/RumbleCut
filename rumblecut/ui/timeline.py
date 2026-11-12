@@ -679,7 +679,9 @@ class ClipTimeline(QWidget):
         x = ev.position().x()
         hit = self._hit(x)
         if hit:
+            # a drag only starts once the pointer moves a few pixels; a plain click seeks there
             self._drag = (hit, self._t(x) - self.start)
+            self._press_x, self._dragged = x, False
         else:
             self.seek.emit(max(self.limits[0], min(self.limits[1], self._t(x))))
 
@@ -699,6 +701,10 @@ class ClipTimeline(QWidget):
                               self)
             return
         what, grab = self._drag
+        if not getattr(self, "_dragged", True):
+            if abs(x - self._press_x) < 4:
+                return
+            self._dragged = True
         t = round(self._t(x) * 10) / 10            # 0.1 s steps
         lo, hi = max(self.limits[0], self.view[0]), min(self.limits[1], self.view[1])   # never off-screen
         if what == "start":
@@ -713,6 +719,10 @@ class ClipTimeline(QWidget):
         self.span_changed.emit(self.start, self.end, what)
 
     def mouseReleaseEvent(self, ev):
+        if self._drag and not getattr(self, "_dragged", True):      # just a click: put the cursor there
+            self._drag = None
+            self.seek.emit(max(self.limits[0], min(self.limits[1], self._t(ev.position().x()))))
+            return
         if self._drag:
             what = self._drag[0]
             self._drag = None
