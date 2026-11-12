@@ -211,16 +211,19 @@ class Timeline(QWidget):
                 glow.setAlpha(60)
                 p.fillRect(QRectF(x0 - 4, top - 4, max(2, x1 - x0) + 8, h + 8), glow)
             hid = i < len(self.hidden) and bool(self.hidden[i])
+            focus = sel or now                       # the moment you're on is filled; the others are outlines
             if hid:                                  # hidden: see-through, faint diagonal lines
                 hc = QColor("#cbd5e1")
-                hc.setAlpha(110 if sel or now else 70)
+                hc.setAlpha(110 if focus else 70)
                 _hatch(p, QRectF(x0, top, max(2, x1 - x0), h), hc)
-            else:
+            elif focus:
                 p.fillRect(QRectF(x0, top, max(2, x1 - x0), h), col)
             edge = QColor(base_col)
-            edge.setAlpha(255 if sel else 160)
-            pen = QPen(QColor("#ffffff") if now else edge, 3 if now else (2 if sel else 1))
-            if origin == "manual" or hid:
+            edge.setAlpha(255 if sel else 220)
+            pen = QPen(QColor("#ffffff") if now else edge, 3 if now else (2 if sel else 1.4))
+            if not focus:                            # dotted border only, see-through middle
+                pen.setDashPattern([2.5, 2.5])
+            elif origin == "manual" or hid:
                 pen.setStyle(Qt.DashLine)
             if hid and not (sel or now):
                 pen.setColor(QColor(203, 213, 225, 120))
@@ -582,9 +585,6 @@ class ClipTimeline(QWidget):
                 hc = QColor("#cbd5e1")
                 hc.setAlpha(60)
                 _hatch(p, rr, hc)
-            else:
-                oc.setAlpha(40)
-                p.fillRect(rr, oc)
             boxes.append((rr, oa, ob, oi, oo, oh))
         # the moment
         col = _origin_colour(self.user) if isinstance(self.user, str) else (USER if self.user else ACCENT)
@@ -600,8 +600,9 @@ class ClipTimeline(QWidget):
         # other moments' outlines on top, so the overlap with this one shows
         for rr, oa, ob, oi, oo, oh in boxes:
             oc = QColor(_origin_colour(oo)) if not oh else QColor("#cbd5e1")
-            oc.setAlpha(200)
-            pen = QPen(oc, 1, Qt.DashLine)
+            oc.setAlpha(220)
+            pen = QPen(oc, 1.4)
+            pen.setDashPattern([2.5, 2.5])
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawRect(rr)

@@ -1315,6 +1315,14 @@ class MainWindow(QMainWindow):
         self.btn_set_in.clicked.connect(lambda: self._set_edge("start"))
         self.btn_set_out = QPushButton("Set end  ]"); self.btn_set_out.setShortcut("O")
         self.btn_set_out.clicked.connect(lambda: self._set_edge("end"))
+        self.btn_to_start = QToolButton(); self.btn_to_start.setIcon(st.standardIcon(QStyle.SP_MediaSkipBackward))
+        self.btn_to_start.setToolTip("Back to the start of the selected moment (Home)")
+        self.btn_to_start.setShortcut("Home")
+        self.btn_to_start.clicked.connect(lambda: self.skip_to_edge("start"))
+        self.btn_to_end = QToolButton(); self.btn_to_end.setIcon(st.standardIcon(QStyle.SP_MediaSkipForward))
+        self.btn_to_end.setToolTip("Jump to the end of the selected moment (End)")
+        self.btn_to_end.setShortcut("End")
+        self.btn_to_end.clicked.connect(lambda: self.skip_to_edge("end"))
         back = QToolButton(); back.setText("−5s"); back.clicked.connect(lambda: self.nudge(-5))
         fwd = QToolButton(); fwd.setText("+5s"); fwd.clicked.connect(lambda: self.nudge(5))
         self.btn_preview = QPushButton("👁 Preview effects")
@@ -1327,7 +1335,7 @@ class MainWindow(QMainWindow):
             self.audio.setVolume(0.8)
             self.vol.valueChanged.connect(lambda x: self.audio.setVolume(x / 100))
         # row 1: playback      row 2: clip actions
-        for wdg in [self.btn_play, back, fwd, self.pos_label]:
+        for wdg in [self.btn_to_start, self.btn_play, self.btn_to_end, back, fwd, self.pos_label]:
             tr.addWidget(wdg)
         tr.addStretch()
         tr.addWidget(QLabel("🔊")); tr.addWidget(self.vol); tr.addWidget(self.vol_lbl)
@@ -2568,6 +2576,27 @@ class MainWindow(QMainWindow):
         if self.player:
             self._load_media(c.source, c.offset)
             self.player.setPosition(int(t * 1000))
+
+    def skip_to_edge(self, edge: str):
+        """⏮ / ⏭: put the playhead on the start or end of the selected moment. If the moment is playing,
+        ⏮ replays it from the top; ⏭ goes to its last moment and stops there."""
+        c = self.current_clip()
+        if c is None:                                   # nothing selected: start / end of the video
+            if self.info:
+                self.seek_to(0.0 if edge == "start" else max(0.0, self.info.duration - 0.05))
+            return
+        playing = bool(self.player) and self.player.playbackState() == QMediaPlayer.PlayingState
+        if edge == "start":
+            t = c.kept[0][0] if c.kept else c.start          # skip a cut at the very start
+            self.seek_clip(c, t)
+            if playing:
+                self._clip_stop_at = c.end
+        else:
+            self.seek_clip(c, max(c.start, c.end - 0.05))
+            if playing and self.player:
+                self._clip_stop_at = None
+                self.player.pause()
+                self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
     def nudge(self, dt):
         if self.player:
