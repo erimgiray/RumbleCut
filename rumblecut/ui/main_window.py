@@ -665,6 +665,12 @@ class MainWindow(QMainWindow):
         self.addAction(a)
         m.addAction(a)
         h = root.addMenu("Help")
+        a = QAction("RumbleCut help", self)
+        a.setShortcut(QKeySequence("F1"))
+        a.setShortcutContext(Qt.ApplicationShortcut)
+        a.triggered.connect(self.open_help)
+        self.addAction(a)
+        h.addAction(a)
         a = QAction("About", self)
         a.triggered.connect(lambda: QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME} {__version__}</b><br>Download Rumble streams, find the best "
@@ -2801,6 +2807,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, "script_tab"):
             self.script_tab.btn_play.setText("■ Stop" if playing else "▶ Play the edit")
 
+    def open_help(self, topic: str = ""):
+        from .help_dialog import HelpDialog
+        if getattr(self, "_help", None) is None:
+            self._help = HelpDialog(self)
+        if topic:
+            self._help.show_topic(topic)
+        self._help.show()
+        self._help.raise_()
+        self._help.activateWindow()
+
     def show_publish(self):
         """Go to Export & publish → Post online."""
         self.tabs.setCurrentIndex(self.export_index)
@@ -3605,7 +3621,18 @@ class MainWindow(QMainWindow):
         v.setSpacing(12)
         title = QLabel("Settings")
         title.setObjectName("h1")
-        v.addWidget(title)
+        trow = QHBoxLayout()
+        trow.addWidget(title)
+        trow.addStretch()
+        hb = QToolButton()
+        hb.setObjectName("helpbtn")
+        hb.setText("?")
+        hb.setFixedSize(38, 38)
+        hb.setCursor(Qt.PointingHandCursor)
+        hb.setToolTip("Help - what every part of RumbleCut does (F1)")
+        hb.clicked.connect(self.open_help)
+        trow.addWidget(hb, 0, Qt.AlignTop)
+        v.addLayout(trow)
         cols = QHBoxLayout()
         v.addLayout(cols, 1)
         left, right = QVBoxLayout(), QVBoxLayout()
@@ -4540,6 +4567,11 @@ QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color
 QFrame#pubcard {{ background: #171a20; border: 1px solid #2c3038; border-radius: 10px; }}
 QFrame#pubcard QLabel, QFrame#pubcard QCheckBox {{ background: transparent; }}
 QWidget#cardbody {{ background: transparent; }}
+QToolButton#helpbtn {{ border-radius: 19px; font-size: 18px; font-weight: 700; padding: 0;
+    background: #2a2e36; border: 1px solid #3a3f49; color: #e5e7eb; }}
+QToolButton#helpbtn:hover {{ background: {ACCENT}; border-color: {ACCENT}; color: #0b0d10; }}
+QListWidget#helptopics::item {{ padding: 8px 6px; }}
+QTextBrowser#helptext {{ background: #16191f; border: 1px solid #2c3038; border-radius: 8px; font-size: 14px; }}
 QToolButton#playbtn {{ background: {ACCENT}; border-color: {ACCENT}; }}
 QToolButton#playbtn:hover {{ background: #9bd85a; }}
 QFrame#vsep {{ color: #3a3f47; margin: 2px 6px; }}

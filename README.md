@@ -111,6 +111,7 @@ Your work is kept automatically: the scan (timeline curve and the moments not sh
 **Beside the player** in the Clip studio there are three tabs: **🎛 Clip** (title, timing, effects), **✂ Script** (the whole stream's text - see [Cut words by script](#cut-words-by-script)) and **🖼 Pictures** (context pictures - see [Context images](#context-images)). Script and Pictures widen that side automatically; they follow whichever moment you pick in the list and play through the same player, so there's only ever one thing playing. Space plays the edit (skipping cuts) while the script is open.
 
 **⚙ Settings**
+- **? Help** (top-right of Settings, or **F1**, or ☰ → Help): what every part of RumbleCut does, one topic per feature, with search.
 - Folders, GPU encoding and the speech model. Changes save automatically.
 - **Updates:**
   - **Rumble downloader:** a one-click update when Rumble changes its site, with no rebuild needed. It's installed into `%APPDATA%\RumbleCut\updates` and used from the next launch. *Undo downloader update* goes back to the downloader that came with the app.
