@@ -133,6 +133,7 @@ class ScriptPanel(QWidget):
         self.clip_tl.span_committed.connect(lambda a, b, w: self._span_done())
         self.clip_tl.seek.connect(self._tl_seek)
         self.clip_tl.menu_requested.connect(lambda t, g: self._menu(None, g, t))
+        self.clip_tl.other_menu.connect(lambda i, t, g: self._menu(i, g, t))
         v.addWidget(self.clip_tl)
 
         tools = QHBoxLayout()
@@ -747,6 +748,7 @@ class ScriptPanel(QWidget):
             ov.set_data(tl.duration, tl.times, tl.score)
         ov.time_fn, ov.joins, ov.sections = tl.time_fn, list(tl.joins), list(tl.sections)
         clips = self.project.clips
+        ov.hidden = [x.hidden for x in clips]
         ov.limits = [win._clip_limits(x) for x in clips]
         idx = clips.index(c) if c in clips else -1
         ov.set_clips(win._spans(), idx, [win._why_html(x) for x in clips], [x.origin for x in clips])
@@ -759,6 +761,8 @@ class ScriptPanel(QWidget):
         ct = self.clip_tl
         ct.time_fn, ct.end_fn = win.clip_tl.time_fn, win.clip_tl.end_fn
         ct.cuts = [(x + c.offset, y + c.offset) for x, y in c.cuts]
+        ct.others = win._others_for(c)
+        ct.hidden = c.hidden
         ct.set_clip(a, b, win._clip_limits(c), tl.times, tl.score, user=c.origin, keep_view=keep_view)
         who = {"user": "★ Your pick", "manual": "✎ Your moment"}.get(c.origin, f"Moment {idx + 1}")
         self.clip_tl_title.setText(f"{who} of {len(clips)} - drag the handles to change where it starts and ends"

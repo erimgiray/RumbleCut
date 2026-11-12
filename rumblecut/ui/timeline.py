@@ -20,6 +20,19 @@ def fmt_time(t: float) -> str:
     return f"{t // 3600:d}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60:d}:{t % 60:02d}"
 
 
+
+def _hatch(p, rect, colour, step=7):
+    """See-through box with thin diagonal lines (a hidden moment)."""
+    p.save()
+    p.setClipRect(rect)
+    p.setPen(QPen(colour, 1))
+    hgt = rect.height()
+    k = -hgt
+    while k < rect.width():
+        p.drawLine(QPointF(rect.left() + k, rect.bottom()), QPointF(rect.left() + k + hgt, rect.top()))
+        k += step
+    p.restore()
+
 class Timeline(QWidget):
     seek = Signal(float)
     clip_clicked = Signal(int)
@@ -45,6 +58,7 @@ class Timeline(QWidget):
         self.joins: list[float] = []        # where separately downloaded parts were joined
         self.playhead = 0.0
         self.user: list = []                # origin of each clip: "ai" | "user" | "manual"
+        self.hidden: list = []              # True = drawn as a see-through hatched box with "?"
         self.limits: list[tuple[float, float]] = []      # how far each clip may go (its source file)
         self._clip_drag = None              # (index, what, grab offset, press x, moved?)
         self.playing = -1                   # the moment the playhead is in while playing
@@ -196,12 +210,20 @@ class Timeline(QWidget):
                 glow = QColor(base_col)
                 glow.setAlpha(60)
                 p.fillRect(QRectF(x0 - 4, top - 4, max(2, x1 - x0) + 8, h + 8), glow)
-            p.fillRect(QRectF(x0, top, max(2, x1 - x0), h), col)
+            hid = i < len(self.hidden) and bool(self.hidden[i])
+            if hid:                                  # hidden: see-through, faint diagonal lines
+                hc = QColor("#cbd5e1")
+                hc.setAlpha(110 if sel or now else 70)
+                _hatch(p, QRectF(x0, top, max(2, x1 - x0), h), hc)
+            else:
+                p.fillRect(QRectF(x0, top, max(2, x1 - x0), h), col)
             edge = QColor(base_col)
             edge.setAlpha(255 if sel else 160)
             pen = QPen(QColor("#ffffff") if now else edge, 3 if now else (2 if sel else 1))
-            if origin == "manual":
+            if origin == "manual" or hid:
                 pen.setStyle(Qt.DashLine)
+            if hid and not (sel or now):
+                pen.setColor(QColor(203, 213, 225, 120))
             p.setPen(pen)
             p.drawRect(QRectF(x0, top, max(2, x1 - x0), h))
             if sel:                                  # grips on the edges: drag to resize
@@ -212,7 +234,15 @@ class Timeline(QWidget):
                 p.setBrush(Qt.NoBrush)
             p.setPen(QColor("#e5e7eb"))
             mark = ("▶ " if now else "") + {"user": "★", "manual": "✎"}.get(origin, "")
-            p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{mark}{i + 1}")
+            if hid:
+                f0 = p.font()
+                fb = QFont(f0)
+                fb.setBold(True)
+                p.setFont(fb)
+                p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, ("▶ " if now else "") + "?")
+                p.setFont(f0)
+            else:
+                p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{mark}{i + 1}")
         # score curve (just the visible stretch)
         sc = self.score
         xa, xb = 8.0, self.width() - 8.0
@@ -441,6 +471,7 @@ class ClipTimeline(QWidget):
     span_committed = Signal(float, float, str)   # on release
     seek = Signal(float)
     menu_requested = Signal(float, object)       # right-click: time, global position
+    other_menu = Signal(int, float, object)      # right-click on another moment: its index, time, position
 
     HANDLE = 7
 
@@ -457,6 +488,8 @@ class ClipTimeline(QWidget):
         self.user = False
         self.end_fn = None         # stream time for an end point (defaults to time_fn)
         self.cuts: list[tuple[float, float]] = []   # ✂ script cuts inside the moment (hatched)
+        self.others: list[tuple] = []  # other moments nearby: (start, end, index, origin, hidden)
+        self.hidden = False            # this moment is hidden: see-through hatched box with "?"
         self.playing = False
         self._drag = None          # ("start" | "end" | "move", grab offset)
 
@@ -536,12 +569,47 @@ class ClipTimeline(QWidget):
                     path.lineTo(QPointF(self._x(tt), bottom - float(vv) * h * 0.9))
                 path.lineTo(QPointF(self._x(ts[-1]), bottom))
                 p.fillPath(path, QColor(133, 199, 66, 45))
+        # other moments that overlap this stretch: faint boxes, numbered (or "?" when hidden)
+        p.setFont(QFont(self.font().family(), 8))
+        boxes = []
+        for (oa, ob, oi, oo, oh) in self.others:
+            if ob < a or oa > b:
+                continue
+            x0, x1 = self._x(max(oa, a)), self._x(min(ob, b))
+            oc = QColor(_origin_colour(oo))
+            rr = QRectF(x0, top + 6, max(2, x1 - x0), h - 6)
+            if oh:
+                hc = QColor("#cbd5e1")
+                hc.setAlpha(60)
+                _hatch(p, rr, hc)
+            else:
+                oc.setAlpha(40)
+                p.fillRect(rr, oc)
+            boxes.append((rr, oa, ob, oi, oo, oh))
         # the moment
         col = _origin_colour(self.user) if isinstance(self.user, str) else (USER if self.user else ACCENT)
         xs, xe = self._x(self.start), self._x(self.end)
-        fill = QColor(col)
-        fill.setAlpha(150 if self.playing else 70)
-        p.fillRect(QRectF(xs, top, xe - xs, h), fill)
+        if self.hidden:
+            hc = QColor("#cbd5e1")
+            hc.setAlpha(140 if self.playing else 90)
+            _hatch(p, QRectF(xs, top, xe - xs, h), hc)
+        else:
+            fill = QColor(col)
+            fill.setAlpha(150 if self.playing else 70)
+            p.fillRect(QRectF(xs, top, xe - xs, h), fill)
+        # other moments' outlines on top, so the overlap with this one shows
+        for rr, oa, ob, oi, oo, oh in boxes:
+            oc = QColor(_origin_colour(oo)) if not oh else QColor("#cbd5e1")
+            oc.setAlpha(200)
+            pen = QPen(oc, 1, Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(rr)
+            p.setPen(QColor("#e5e7eb") if not oh else QColor("#cbd5e1"))
+            tag = "?" if oh else ({"user": "★", "manual": "✎"}.get(oo, "") + str(oi + 1))
+            if rr.width() >= 14:
+                p.drawText(QRectF(rr.left() + 3, rr.top() + 1, max(12.0, rr.width() - 6), 13),
+                           Qt.AlignLeft | Qt.AlignVCenter, tag)
         p.setPen(QPen(QColor("#ffffff") if self.playing else col, 2 if self.playing else 1))
         p.drawLine(QPointF(xs, top), QPointF(xe, top))
         p.drawLine(QPointF(xs, bottom), QPointF(xe, bottom))
@@ -577,9 +645,15 @@ class ClipTimeline(QWidget):
         span = self.end - self.start
         removed = sum(max(0.0, min(b, self.end) - max(a, self.start)) for a, b in self.cuts)
         lab = f"{span:.1f} s → {span - removed:.1f} s after cuts" if removed > 0.05 else f"{span:.1f} s"
+        if self.hidden:
+            lab = "?   " + lab
         if self.playing:
             p.setPen(QColor("#ffffff"))
             lab = "▶ playing  ·  " + lab
+        if self.hidden:
+            fb = QFont(self.font().family(), 9)
+            fb.setBold(True)
+            p.setFont(fb)
         p.drawText(QRectF(xs - 60, 2, max(1, xe - xs) + 120, 16), Qt.AlignCenter, lab)
         # playhead
         if a <= self.playhead <= b:
@@ -590,7 +664,14 @@ class ClipTimeline(QWidget):
     # -- mouse
     def mousePressEvent(self, ev):
         if ev.button() == Qt.RightButton:
-            self.menu_requested.emit(self._t(ev.position().x()), ev.globalPosition().toPoint())
+            t = self._t(ev.position().x())
+            if not (self.start <= t <= self.end):
+                hits = [o for o in self.others if o[0] <= t <= o[1]]
+                if hits:                      # the shortest one under the pointer
+                    o = min(hits, key=lambda o: o[1] - o[0])
+                    self.other_menu.emit(o[2], t, ev.globalPosition().toPoint())
+                    return
+            self.menu_requested.emit(t, ev.globalPosition().toPoint())
             return
         if ev.button() != Qt.LeftButton:
             return

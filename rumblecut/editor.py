@@ -142,6 +142,7 @@ class Clip:
     jump_cut: str = "punch"                         # "punch" = zoom in on every other piece, "hard" = plain
     orig: list = field(default_factory=list)        # [start, end] as first found - for ↺ Reset
     export_opts: dict = field(default_factory=dict) # this clip's own export choices: aspect, quality, name
+    hidden: bool = False      # hidden on the timelines (shown as a see-through '?' box); still exported if ticked
 
     EFFECT_FIELDS = ("fade_in", "fade_out", "speed", "zoom", "color", "vignette", "caption", "caption_pos",
                      "normalize_audio", "transition", "jump_cut")

@@ -322,3 +322,33 @@ def suggest_title(transcript: str, stream_title: str = "") -> dict:
     if not title:
         raise AIError("The model didn't suggest a title.")
     return {"title": title, "caption": caption}
+
+
+BOUNDARY_SYSTEM = ("You edit short clips cut from livestreams. You are shown numbered transcript lines around one "
+                   "edge of a clip. Choose the line where the clip should {edge} so it works on its own: "
+                   "{rule} Answer only with JSON: {{\"line\": <number>, \"why\": \"<one short sentence>\"}}")
+BOUNDARY_RULES = {
+    "start": "begin where the topic is introduced, so a viewer knows what is being talked about before the "
+             "point lands; start on the first word of a sentence, never mid-thought, and don't include unrelated "
+             "chatter before it.",
+    "end": "end right after the point, punchline or reaction lands; finish on the end of a sentence and "
+           "don't run on into the next topic.",
+}
+
+
+def pick_boundary(lines: list[tuple[float, float, str]], edge: str, current: float, about: str = "") -> dict:
+    """lines: (start, end, text) around a clip edge. Returns {"t": new time, "why", "line"}."""
+    if not lines:
+        raise AIError("Nothing was said around there, so there's no sentence to start or end on.")
+    numbered = "\n".join(f"{i + 1}. [{a:.1f}s] {txt.strip()}" for i, (a, b, txt) in enumerate(lines))
+    prompt = (f"The clip is about: {about or 'unknown'}\n"
+              f"The clip currently {'starts' if edge == 'start' else 'ends'} at {current:.1f}s.\n\n"
+              f"Transcript:\n{numbered}\n\nWhich line should the clip {edge} {'on' if edge == 'start' else 'after'}?")
+    d = complete_json(prompt, BOUNDARY_SYSTEM.format(edge=edge, rule=BOUNDARY_RULES[edge]), max_tokens=150)
+    try:
+        n = int(d.get("line"))
+    except (TypeError, ValueError):
+        raise AIError(f"The model didn't pick a line: {str(d)[:120]}")
+    n = max(1, min(len(lines), n))
+    a, b, _ = lines[n - 1]
+    return {"t": a if edge == "start" else b, "why": str(d.get("why", "")).strip()[:200], "line": n}

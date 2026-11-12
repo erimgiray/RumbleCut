@@ -20,6 +20,7 @@ DEFAULTS = {
     "ai_guidance": "",           # what the user told the AI to look for
     "speech_gpu": True,          # use the NVIDIA GPU for speech-to-text when it works
     "whisper_model": "small",
+    "manual_len": 5.0,          # seconds - length of a moment you add with a right-click
     "export_quality": "high",
     "auto_update_check": True,
     "update_repo": "erimgiray/RumbleCut",

@@ -1145,6 +1145,8 @@ class MainWindow(QMainWindow):
         self.clip_tl.span_committed.connect(self._clip_span_committed)
         self.clip_tl.seek.connect(self.scrub_to)
         self.clip_tl.menu_requested.connect(lambda t, g: self.current_clip() and self._clip_menu(self.current_clip(), g, t))
+        self.clip_tl.other_menu.connect(lambda i, t, g: 0 <= i < len(self.project.clips) and
+                                        self._clip_menu(self.project.clips[i], g, t))
         ctl.addWidget(self.clip_tl)
         self.clip_tl_box.setMaximumHeight(0)
         self._clip_tl_h = 96
@@ -1738,7 +1740,18 @@ class MainWindow(QMainWindow):
             self._show_clip_timeline(None)
         self._mark_added_sections()
 
+    def _others_for(self, c) -> list[tuple]:
+        """The other moments, for drawing behind c on its own timeline."""
+        return [(o.start + o.offset, o.end + o.offset, i, o.origin, o.hidden)
+                for i, o in enumerate(self.project.clips) if o is not c]
+
     def _sync_timeline(self, row: int):
+        self.timeline.hidden = [c.hidden for c in self.project.clips]
+        c = self.current_clip()
+        if c is not None:
+            self.clip_tl.others = self._others_for(c)
+            self.clip_tl.hidden = c.hidden
+            self.clip_tl.update()
         self.timeline.limits = [self._clip_limits(c) for c in self.project.clips]
         self.timeline.set_clips(self._spans(), row, [self._why_html(c) for c in self.project.clips],
                                 [c.origin for c in self.project.clips])
@@ -1825,6 +1838,9 @@ class MainWindow(QMainWindow):
             self._update_item_text(self.clip_list.currentRow())
 
     def _item_text(self, i: int, c) -> str:
+        if c.hidden:
+            a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream_end(c.end + c.offset)
+            return f"? {i + 1}. (hidden)  {c.title}\n{fmt_time(a)} – {fmt_time(b)}  ·  {c.out_length:.0f}s"
         reason = c.reasons[0] if c.reasons else "Manual clip"
         a, b = self.project.to_stream(c.start + c.offset), self.project.to_stream_end(c.end + c.offset)
         tag = "   🔊 audio only" if not self._has_video(c.source) else ("   🎬 video fetched" if c.offset else "")
@@ -1885,6 +1901,8 @@ class MainWindow(QMainWindow):
                 lim = (c.offset, c.offset + (self._src_duration(c.source) or (c.end + 60)))
             r_ = self.result
             self.clip_tl.cuts = [(a + c.offset, b + c.offset) for a, b in c.cuts]
+            self.clip_tl.others = self._others_for(c)
+            self.clip_tl.hidden = c.hidden
             self.clip_tl.set_clip(c.start + c.offset, c.end + c.offset, lim,
                                   getattr(r_, "times", None), getattr(r_, "score", None),
                                   user=c.origin, keep_view=keep_view)
@@ -2037,7 +2055,7 @@ class MainWindow(QMainWindow):
         if not self.project.source:
             return
         dur = self.info.duration if self.info else t + 30
-        L = min(self.max_len.value(), max(self.min_len.value(), 20))
+        L = max(1.0, min(float(config.load_settings().get("manual_len", 5.0) or 5.0), dur))
         s0 = max(0.0, min(t - L / 2, dur - L))
         c = editor.Clip(source=self.project.source, start=round(s0, 1), end=round(min(dur, s0 + L), 1),
                         title=f"My moment - {fmt_time(self.project.to_stream(t)).replace(':', '.')}",
@@ -2105,15 +2123,110 @@ class MainWindow(QMainWindow):
         rm.addAction("Effects back to normal", lambda: self._reset_clip(c, "effects"))
         rm.addSeparator()
         rm.addAction("Everything", lambda: self._reset_clip(c, "all"))
+        # --- AI: where should the clip(s) this moment overlaps start or end?
+        m.addSeparator()
+        others = [o for o in self.project.clips if o is not c and o.source == c.source]
+        starts_in = [o for o in others if c.start - 0.05 <= o.start <= c.end + 0.05]
+        ends_in = [o for o in others if c.start - 0.05 <= o.end <= c.end + 0.05 and o not in starts_in]
+        ok = ai.is_configured() and transcribe.available()
+        tip = "" if ok else "  (needs an AI model and speech-to-text - Settings → AI models)"
+        for o in starts_in:
+            a = m.addAction(f"✨  AI: find a good start for “{o.title[:40]}”" + tip,
+                            lambda o=o: self.ai_boundary(o, "start", near=c))
+            a.setEnabled(ok)
+        for o in ends_in:
+            a = m.addAction(f"✨  AI: find a good end for “{o.title[:40]}”" + tip,
+                            lambda o=o: self.ai_boundary(o, "end", near=c))
+            a.setEnabled(ok)
+        am = m.addMenu("✨  AI: this moment's start or end")
+        am.setEnabled(ok)
+        am.addAction("Find a good start", lambda: self.ai_boundary(c, "start"))
+        am.addAction("Find a good end", lambda: self.ai_boundary(c, "end"))
         m.addSeparator()
         m.addAction("💾  Save as clip…", lambda: self.save_clip_as(c))
         m.addAction("⧉  Duplicate", self.duplicate_clip)
+        m.addAction("👁  Show this moment" if c.hidden else "🙈  Hide this moment",
+                    lambda: self._set_hidden(c, not c.hidden))
         m.addAction("☐  Untick (don't export)" if c.enabled else "☑  Tick (export it)",
                     lambda: self.clip_list.item(self.project.clips.index(c)).setCheckState(
                         Qt.Unchecked if c.enabled else Qt.Checked))
         m.addSeparator()
         m.addAction("🗑  Delete this moment", self.remove_clip)
         self._exec_menu(m, gpos)
+
+    def _set_hidden(self, c, on: bool):
+        if c not in self.project.clips:
+            return
+        c.hidden = on
+        r = self.project.clips.index(c)
+        self._update_item_text(r)
+        self._sync_timeline(self.clip_list.currentRow())
+        if self.current_clip() is c:
+            self._show_clip_timeline(c, keep_view=True)
+        if hasattr(self, "script_tab"):
+            self.script_tab._sync_views(keep_view=True)
+        self._show_toast("🙈 Hidden - right-click it again to show it" if on else "👁 Shown again")
+
+    def ai_boundary(self, c, edge: str, near=None):
+        """Ask the AI where clip c should start (or end), reading what's said around that edge.
+        near = the moment that was right-clicked (it marks roughly where the edge should be)."""
+        if c not in self.project.clips:
+            return
+        cur = c.start if edge == "start" else c.end
+        if near is not None:     # look around the right-clicked moment as well as the clip's own edge
+            lo, hi = min(cur, near.start) - 25, max(cur, near.end) + 10
+        else:
+            lo, hi = cur - 25, cur + 12
+        if edge == "end":
+            lo, hi = (min(cur, near.start) - 10, max(cur, near.end) + 25) if near is not None else (cur - 12, cur + 25)
+        dur = self.info.duration if self.info else hi
+        lo, hi = max(0.0, lo), min(dur, hi)
+        if edge == "start":
+            hi = min(hi, c.end - 1.0)
+        else:
+            lo = max(lo, c.start + 1.0)
+        about = c.title + ((" - " + "; ".join(c.reasons[:2])) if c.reasons else "")
+
+        def job(on_progress=None, cancel=None):
+            on_progress(0.05, f"Listening around the {edge} of “{c.title}”…")
+            segs = transcribe.transcribe(c.source, start=lo, end=hi, cancel=cancel,
+                                         on_progress=lambda f, m: on_progress(0.05 + 0.75 * max(f, 0), m))
+            lines = [(a, b, t) for a, b, t in segs if t.strip() and lo - 1 <= a <= hi]
+            on_progress(0.85, "Asking the AI where it should " + edge + "…")
+            return ai.pick_boundary(lines, edge, cur, about)
+
+        w = Worker(job)
+        w.progress.connect(lambda f, m: self.statusBar().showMessage(m))
+
+        def done(r):
+            if c not in self.project.clips:
+                return
+            t = round(float(r["t"]), 2)
+            if edge == "start":
+                t = min(t, c.end - 1.0)
+            else:
+                t = max(t, c.start + 1.0)
+            old = c.start if edge == "start" else c.end
+            setattr(c, edge, t)
+            note = f"AI moved the {edge} to {fmt_time(self.project.to_stream(t + c.offset))}" + \
+                (f": {r['why']}" if r.get("why") else "")
+            c.timing = [x for x in c.timing if not x.startswith(f"AI moved the {edge}")] + [note]
+            self._clip_edited(c)
+            row = self.project.clips.index(c)
+            if self.clip_list.currentRow() == row:
+                self.select_clip(row)
+            else:
+                self._sync_timeline(self.clip_list.currentRow())
+            if hasattr(self, "script_tab"):
+                self.script_tab.refresh()
+            moved = t - old
+            self.statusBar().showMessage(note, 8000)
+            self._show_toast(f"✨ “{c.title[:40]}” now {'starts' if edge == 'start' else 'ends'} "
+                             f"{abs(moved):.1f}s {'earlier' if moved < 0 else 'later'}" if abs(moved) > 0.05
+                             else f"✨ The AI kept the {edge} of “{c.title[:40]}” where it was")
+        w.done.connect(done)
+        w.failed.connect(lambda m: QMessageBox.warning(self, "AI start / end", m))
+        self._start(w)
 
     def _reset_clip(self, c, what: str):
         if c not in self.project.clips:
@@ -3420,6 +3533,22 @@ class MainWindow(QMainWindow):
         self.s_gpu.toggled.connect(lambda b: self._save_setting("use_gpu", b))
         fl.addRow("", self.s_gpu)
         right.addWidget(g2)
+
+        gm = QGroupBox("Moments you add")
+        mf = QFormLayout(gm)
+        self.s_manual_len = QDoubleSpinBox()
+        self.s_manual_len.setRange(1, 600)
+        self.s_manual_len.setDecimals(0)
+        self.s_manual_len.setSingleStep(1)
+        self.s_manual_len.setSuffix(" s")
+        self.s_manual_len.setValue(float(s.get("manual_len", 5.0) or 5.0))
+        self.s_manual_len.valueChanged.connect(lambda x: self._save_setting("manual_len", float(x)))
+        mf.addRow("Length", self.s_manual_len)
+        ml = QLabel("How long a moment is when you right-click the timeline to add one. Drag its edges to change it.")
+        ml.setObjectName("muted")
+        ml.setWordWrap(True)
+        mf.addRow("", ml)
+        right.addWidget(gm)
 
         g3 = QGroupBox("About this copy")
         al = QFormLayout(g3)
