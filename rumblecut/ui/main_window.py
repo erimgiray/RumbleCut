@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import subprocess
 import sys
 import tempfile
@@ -514,6 +514,15 @@ class MainWindow(QMainWindow):
         self._refresh_history()
         if config.load_settings().get("auto_update_check", True):
             QTimer.singleShot(3000, lambda: self.check_updates(silent=True))
+        # undo / redo: the moments are checked a few times a second and each settled change is one step
+        self._undo_stack: list = []
+        self._redo_stack: list = []
+        self._hist = None                  # (key, refs, row) of the state on screen
+        self._hist_poll = None
+        self._hist_project = None
+        self._hist_timer = QTimer(self)
+        self._hist_timer.timeout.connect(self._history_tick)
+        self._hist_timer.start(300)
         # your work is kept between runs (and across updates): saved every half minute and on quit
         self._session_sig = ""
         self._autosave_timer = QTimer(self)
@@ -567,6 +576,16 @@ class MainWindow(QMainWindow):
             self.addAction(a)                  # shortcuts work even while the menu is closed
             m.addAction(a)
         m.addSeparator()
+        em = root.addMenu("Edit")
+        self.act_undo = QAction("Undo", self)
+        self.act_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        self.act_undo.triggered.connect(self.undo)
+        self.act_redo = QAction("Redo", self)
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
+        self.act_redo.triggered.connect(self.redo)
+        for a in (self.act_undo, self.act_redo):
+            self.addAction(a)                  # work anywhere in the window (text boxes keep their own undo)
+            em.addAction(a)
         a = QAction("Settings…", self)
         a.triggered.connect(self.open_settings)
         m.addAction(a)
@@ -2196,6 +2215,105 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("🗑  Delete this moment", self.remove_clip)
         self._exec_menu(m, gpos)
+
+    # ------------------------------------------------------------------ undo / redo
+    def _snap(self):
+        """The moments as a compact text key (plus references to the big, unchanging parts)."""
+        light, refs = [], []
+        for c in self.project.clips:
+            d = {f.name: getattr(c, f.name) for f in fields(c)
+                 if f.name not in ("words", "cut_suggestions", "overlays")}
+            d["overlays"] = [{f.name: getattr(o, f.name) for f in fields(o) if f.name != "candidates"}
+                             for o in c.overlays]
+            light.append(d)
+            refs.append((c.words, c.cut_suggestions, [o.candidates for o in c.overlays]))
+        return json.dumps(light, sort_keys=True, default=str), refs
+
+    def _history_tick(self, force: bool = False):
+        if self.project is not self._hist_project:          # a new video / project: start a fresh history
+            self._hist_project = self.project
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            key, refs = self._snap()
+            self._hist, self._hist_poll = (key, refs, self.clip_list.currentRow()), None
+            return
+        if not force and QApplication.mouseButtons() != Qt.NoButton:
+            return                                       # mid-drag: wait for the drop
+        key, refs = self._snap()
+        if self._hist is not None and key == self._hist[0]:
+            self._hist_poll = None
+            return
+        if not force and key != self._hist_poll:          # still changing (typing, sliding): wait
+            self._hist_poll = key
+            return
+        if self._hist is not None:
+            self._undo_stack.append(self._hist)
+            del self._undo_stack[:-200]
+        self._redo_stack.clear()
+        self._hist, self._hist_poll = (key, refs, self.clip_list.currentRow()), None
+
+    def _history_resync(self):
+        """Take what's on screen as the current state without making it an undo step."""
+        key, refs = self._snap()
+        self._hist, self._hist_poll = (key, refs, self.clip_list.currentRow()), None
+
+    def _script_panel_active(self) -> bool:
+        st = getattr(self, "script_tab", None)
+        return bool(st is not None and st.isVisible() and self.tabs.currentIndex() == self.ctx_index)
+
+    def undo(self):
+        st = getattr(self, "script_tab", None)
+        if self._script_panel_active() and st._undo:     # in the Script tab: undo the last cut first
+            st.undo()
+            self._history_resync()
+            return
+        self._history_tick(force=True)
+        while self._undo_stack and self._undo_stack[-1][0] == self._hist[0]:
+            self._undo_stack.pop()
+        if not self._undo_stack:
+            self.statusBar().showMessage("Nothing to undo", 2500)
+            return
+        self._redo_stack.append(self._hist)
+        self._restore_state(self._undo_stack.pop())
+        self.statusBar().showMessage("↶ Undone  (Ctrl+Shift+Z to redo)", 3000)
+
+    def redo(self):
+        st = getattr(self, "script_tab", None)
+        if self._script_panel_active() and st._redo:
+            st.redo()
+            self._history_resync()
+            return
+        self._history_tick(force=True)
+        while self._redo_stack and self._redo_stack[-1][0] == self._hist[0]:
+            self._redo_stack.pop()
+        if not self._redo_stack:
+            self.statusBar().showMessage("Nothing to redo", 2500)
+            return
+        self._undo_stack.append(self._hist)
+        self._restore_state(self._redo_stack.pop())
+        self.statusBar().showMessage("↷ Redone", 3000)
+
+    def _restore_state(self, state):
+        key, refs, row = state
+        clips = []
+        for d, (words, sugg, cands) in zip(json.loads(key), refs):
+            ovs = []
+            for k, o in enumerate(d.pop("overlays", [])):
+                ovs.append(editor.ImageOverlay(**o, candidates=cands[k] if k < len(cands) else []))
+            clips.append(editor.Clip(**d, overlays=ovs, words=words, cut_suggestions=sugg))
+        self.project.clips = clips
+        self._hist, self._hist_poll = state, None
+        self._fill_clip_list()
+        if clips:
+            r = max(0, min(row, len(clips) - 1)) if row is not None and row >= 0 else 0
+            self.clip_list.setCurrentRow(r)
+            self.select_clip(r)
+        self._sync_timeline(self.clip_list.currentRow())
+        st = getattr(self, "script_tab", None)
+        if st is not None and st.isVisible():
+            st.refresh()
+        if self.tabs.tabText(self.tabs.currentIndex()).strip().endswith("Export"):
+            self._fill_export_rows()
 
     def _set_hidden(self, c, on: bool):
         if c not in self.project.clips:

@@ -263,8 +263,7 @@ class ScriptPanel(QWidget):
         split.setSizes([720, 480])
         v.addWidget(split, 1)
 
-        QShortcut(QKeySequence.Undo, self, activated=self.undo)
-        QShortcut(QKeySequence.Redo, self, activated=self.redo)
+        # Ctrl+Z / Ctrl+Shift+Z come from the main window, which hands them to this panel while it's open
         self._moment_changed()
 
     # ------------------------------------------------------------------ basics
