@@ -735,16 +735,43 @@ class ScriptPanel(QWidget):
         mi = 0
         open_ = set()
 
-        def put_marks(t, inclusive=True):
+        done_marks = set()
+
+        def put_marks(t, inclusive=True, only=None):
+            """Write the points due before time t. only="end" writes just the ends (the starts wait), so at a
+            paragraph break the ends close the old paragraph and the starts open the new one."""
             nonlocal mi
-            while mi < len(marks) and (marks[mi][0] <= t if inclusive else marks[mi][0] < t):
-                mt, _, kind, i = marks[mi]
+            j = mi
+            while j < len(marks) and (marks[j][0] <= t if inclusive else marks[j][0] < t):
+                if j not in done_marks and (only is None or marks[j][2] == only):
+                    emit(marks[j])
+                    done_marks.add(j)
+                j += 1
+            while mi < len(marks) and mi in done_marks:
                 mi += 1
+
+        def emit(mark):
+            if True:                                   # (kept indented like the loop it came from)
+                mt, _, kind, i = mark
                 x = clips[i]
                 if x is not c:
-                    # only the selected moment gets start/end points; the others just show as a tint
+                    # other moments: a small, faint number where they start and end (not draggable -
+                    # select that moment to move its points)
                     (open_.add if kind == "start" else open_.discard)(i)
-                    continue
+                    g = QTextCharFormat()
+                    oc = QColor("#9ca3af" if (x.hidden or not x.enabled) else _origin_colour(x.origin))
+                    oc.setAlpha(215)
+                    g.setForeground(QBrush(oc))
+                    g.setFontPointSize(max(7.5, v.font().pointSizeF() * 0.88))
+                    g.setFontWeight(QFont.DemiBold)
+                    bgc = QColor(oc)
+                    bgc.setAlpha(22)
+                    g.setBackground(QBrush(bgc))
+                    g.setToolTip(f"{i + 1}. {x.title} {'starts' if kind == 'start' else 'ends'} here"
+                                 + (" (deselected)" if not x.enabled else "") + " - select it to move this")
+                    tag = "?" if x.hidden else str(i + 1)
+                    cur.insertText(f"\u00a0‹{tag}\u00a0" if kind == "start" else f"\u00a0{tag}›\u00a0", g)
+                    return
                 f = QTextCharFormat()
                 col = QColor(_origin_colour(x.origin))
                 if x.hidden or not x.enabled:
@@ -816,6 +843,7 @@ class ScriptPanel(QWidget):
             if not ctoks:
                 cur.insertText(" (not written out yet - press 📝 Get the script) ", gapf)
             for k, tk in enumerate(ctoks):
+                put_marks(tk["start"] + c.offset, inclusive=False)      # other moments starting/ending in here
                 fmt = QTextCharFormat(base)
                 a, b = tk["start"], tk["end"]
                 if tk["kind"] == "pause":
@@ -862,7 +890,7 @@ class ScriptPanel(QWidget):
             draft = len(wd) > 3
             if c is not None and not done_current and (a >= cs - 0.01 or b > cs):
                 if prev is not None and cs - prev[1] > 1.2:
-                    put_marks(cs, inclusive=False)
+                    put_marks(cs, inclusive=False, only="end")
                     new_par(cs)
                 insert_current()
             if c is not None and done_current and a < ce and b > cs:
@@ -875,14 +903,14 @@ class ScriptPanel(QWidget):
             elif prev is not None:
                 gap = a - prev[1]
                 if gap > 30 and not is_covered(prev[1], a):
-                    put_marks(prev[1] + 0.01)
+                    put_marks(prev[1] + 0.01, only="end")
                     cur.insertBlock()
                     cur.insertText(f"[… {fmt_time(self.project.to_stream(prev[1]))} – "
                                    f"{fmt_time(self.project.to_stream(a))} not written out yet]", gapf)
                     new_par(a)
                 elif gap > 3.0 or (gap > 1.2 and prev[2][-1:] in ".?!") or \
                         (a - par_t[0] > 45 and prev[2][-1:] in ".?!"):      # keep paragraphs readable
-                    put_marks(a, inclusive=False)
+                    put_marks(a, inclusive=False, only="end")
                     new_par(a)
             put_marks(a)
             fmt = QTextCharFormat(draft_f if draft else base)

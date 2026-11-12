@@ -161,8 +161,8 @@ The **🎛 Clip** tab beside the player:
 # Script
 
 The **✂ Script** tab beside the player shows the **whole stream's text**, with the selected moment marked
-**⟦3 … 3⟧**. Other moments are tinted in their colour (grey when deselected), so you can see where
-they are without their points getting in the way.
+**⟦3 … 3⟧** (big chips you can drag). Every other moment is shown too, with small numbers **‹2 … 2›**
+where it starts and ends and a tint in its colour (grey when deselected) - select it to move its points.
 
 **Writing it out** - opening the tab starts writing the whole stream out word by word in the background:
 around the selected moment first, then the other moments, then everything else. Until a part is done you
