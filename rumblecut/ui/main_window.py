@@ -1074,6 +1074,8 @@ class MainWindow(QMainWindow):
             bar.addWidget(QLabel(lbl))
             bar.addWidget(wdg)
         bar.addWidget(self.use_scenes)
+        self._top_bar = bar                      # the player controls are added here too (always in view)
+        self._top_bar_at = bar.count()
         bar.addStretch()
         self.btn_analyse = QPushButton("Find highlights")
         self.btn_analyse.setObjectName("primary")
@@ -1347,11 +1349,11 @@ class MainWindow(QMainWindow):
         self.btn_set_in.clicked.connect(lambda: self._set_edge("start"))
         self.btn_set_out = QPushButton("Set end  ]"); self.btn_set_out.setShortcut("O")
         self.btn_set_out.clicked.connect(lambda: self._set_edge("end"))
-        self.btn_to_start = QToolButton(); self.btn_to_start.setIcon(st.standardIcon(QStyle.SP_MediaSkipBackward))
+        self.btn_to_start = QToolButton(); self.btn_to_start.setText("⏮")
         self.btn_to_start.setToolTip("Back to the start of the selected moment (Home)")
         self.btn_to_start.setShortcut("Home")
         self.btn_to_start.clicked.connect(lambda: self.skip_to_edge("start"))
-        self.btn_to_end = QToolButton(); self.btn_to_end.setIcon(st.standardIcon(QStyle.SP_MediaSkipForward))
+        self.btn_to_end = QToolButton(); self.btn_to_end.setText("⏭")
         self.btn_to_end.setToolTip("Jump to the end of the selected moment (End)")
         self.btn_to_end.setShortcut("End")
         self.btn_to_end.clicked.connect(lambda: self.skip_to_edge("end"))
@@ -1366,12 +1368,20 @@ class MainWindow(QMainWindow):
         if self.player and self.audio:
             self.audio.setVolume(0.8)
             self.vol.valueChanged.connect(lambda x: self.audio.setVolume(x / 100))
-        # row 1: playback      row 2: clip actions
-        for wdg in [self.btn_to_start, self.btn_play, self.btn_to_end, back, fwd, self.pos_label]:
-            tr.addWidget(wdg)
-        tr.addStretch()
-        tr.addWidget(QLabel("🔊")); tr.addWidget(self.vol); tr.addWidget(self.vol_lbl)
-        mv.addLayout(tr)
+        # playback controls sit in the top row (next to Scene changes) so they're always in view;
+        # under the video: clip actions
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setObjectName("vsep")
+        k = self._top_bar_at
+        for wdg in [sep, self.btn_to_start, self.btn_play, self.btn_to_end, back, fwd, self.pos_label,
+                    QLabel("🔊"), self.vol, self.vol_lbl]:
+            self._top_bar.insertWidget(k, wdg)
+            k += 1
+        self.btn_play.setMinimumWidth(44)
+        self.btn_play.setObjectName("playbtn")           # green, so it stands out up there
+        self.pos_label.setMinimumWidth(92)
+        self.vol.setMaximumWidth(72)
         tr2 = QHBoxLayout()
         for wdg in [self.btn_play_clip, self.btn_set_in, self.btn_set_out]:
             tr2.addWidget(wdg)
@@ -4435,6 +4445,9 @@ QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color
 QFrame#pubcard {{ background: #171a20; border: 1px solid #2c3038; border-radius: 10px; }}
 QFrame#pubcard QLabel, QFrame#pubcard QCheckBox {{ background: transparent; }}
 QWidget#cardbody {{ background: transparent; }}
+QToolButton#playbtn {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QToolButton#playbtn:hover {{ background: #9bd85a; }}
+QFrame#vsep {{ color: #3a3f47; margin: 2px 6px; }}
 QFrame#cardline {{ background: #2c3038; border: none; }}
 QCheckBox#cardtitle, QLabel#cardtitle {{ font-size: 14px; font-weight: 600; color: #e5e7eb; spacing: 8px; }}
 QFrame#pubbar {{ border-top: 1px solid #2c3038; }}
