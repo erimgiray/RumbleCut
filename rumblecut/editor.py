@@ -13,7 +13,7 @@ import random
 import shutil
 import tempfile
 import textwrap
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
@@ -212,6 +212,8 @@ class Project:
     export: ExportSettings = field(default_factory=ExportSettings)
     # the AI's section-by-section summary of what's said: {start, end, summary, interest(0-1)} in file time
     sections: list = field(default_factory=list)
+    # the scan itself, so it survives restarts and updates: {"duration", "times", "score", "candidates", "shown"}
+    analysis: dict = field(default_factory=dict)
 
     def to_stream(self, t: float) -> float:
         """Position in this project's file -> position in the original stream."""
@@ -247,14 +249,19 @@ class Project:
     @staticmethod
     def load(path: str | Path) -> "Project":
         d = json.loads(Path(path).read_text(encoding="utf-8"))
+
+        def known(cls, x: dict) -> dict:          # ignore fields from a newer/older version
+            names = {f.name for f in fields(cls)}
+            return {k: v for k, v in x.items() if k in names}
         clips = []
         for c in d.get("clips", []):
-            ovs = [ImageOverlay(**o) for o in c.pop("overlays", [])]
-            clips.append(Clip(**c, overlays=ovs))
-        exp = ExportSettings(**d.get("export", {}))
+            ovs = [ImageOverlay(**known(ImageOverlay, o)) for o in c.pop("overlays", [])]
+            clips.append(Clip(**known(Clip, c), overlays=ovs))
+        exp = ExportSettings(**known(ExportSettings, d.get("export", {})))
         return Project(source=d.get("source", ""), title=d.get("title", ""), url=d.get("url", ""),
                        offset=float(d.get("offset", 0.0)), segments=d.get("segments", []) or [],
-                       clips=clips, export=exp, sections=d.get("sections", []) or [])
+                       clips=clips, export=exp, sections=d.get("sections", []) or [],
+                       analysis=d.get("analysis", {}) or {})
 
 
 # ----------------------------------------------------------------------------- helpers

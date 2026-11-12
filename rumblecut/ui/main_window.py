@@ -1,13 +1,18 @@
 """Main window: Get Video → Clip Studio → Export, plus the Context Images tab."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from dataclasses import asdict
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import re
+
+import numpy as np
 
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette,
@@ -486,6 +491,12 @@ class MainWindow(QMainWindow):
         self._refresh_history()
         if config.load_settings().get("auto_update_check", True):
             QTimer.singleShot(3000, lambda: self.check_updates(silent=True))
+        # your work is kept between runs (and across updates): saved every half minute and on quit
+        self._session_sig = ""
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start(30_000)
+        QTimer.singleShot(0, self._restore_session)
 
     @staticmethod
     def _cancel_shown(btn, on: bool):
@@ -1637,6 +1648,7 @@ class MainWindow(QMainWindow):
                       if res.highlights else "✔ Done: nothing found.")
             QTimer.singleShot(1500, lambda: self.left_tabs.setCurrentIndex(0))
         self.btn_reask.setEnabled(bool(getattr(res, "blocks", None)))
+        QTimer.singleShot(500, self._autosave)
 
     def show_more(self, first: bool = False):
         """Move the next batch of ranked moments into the clip list."""
@@ -2147,7 +2159,7 @@ class MainWindow(QMainWindow):
         m.addAction("⧉  Duplicate", self.duplicate_clip)
         m.addAction("👁  Show this moment" if c.hidden else "🙈  Hide this moment",
                     lambda: self._set_hidden(c, not c.hidden))
-        m.addAction("☐  Untick (don't export)" if c.enabled else "☑  Tick (export it)",
+        m.addAction("☐  Deselect (don't export)" if c.enabled else "☑  Select (export it)",
                     lambda: self.clip_list.item(self.project.clips.index(c)).setCheckState(
                         Qt.Unchecked if c.enabled else Qt.Checked))
         m.addSeparator()
@@ -2718,9 +2730,9 @@ class MainWindow(QMainWindow):
         hl.setObjectName("muted")
         hl.setWordWrap(True)
         hrow.addWidget(hl, 1)
-        b_all = QPushButton("Tick all")
+        b_all = QPushButton("Select all")
         b_all.clicked.connect(lambda: self._tick_all_export(True))
-        b_none = QPushButton("Untick all")
+        b_none = QPushButton("Deselect all")
         b_none.clicked.connect(lambda: self._tick_all_export(False))
         hrow.addWidget(b_all)
         hrow.addWidget(b_none)
@@ -3165,11 +3177,81 @@ class MainWindow(QMainWindow):
         if not os.path.exists(proj.source):
             QMessageBox.warning(self, "Video missing", f"The project's video wasn't found:\n{proj.source}")
             return
+        self._use_project(proj, path)
+
+    # ---- the session: kept between runs and across updates
+    @staticmethod
+    def _session_file() -> Path:
+        return config.app_data_dir() / "last session.rcproj"
+
+    def _pack_analysis(self):
+        """The scan (timeline curve + the moments not shown yet) as plain data for the project file."""
+        r = self.result
+        if r is None or getattr(r, "times", None) is None or not len(r.times):
+            return self.project.analysis or {}
+        return {"duration": float(r.duration),
+                "times": [round(float(x), 2) for x in r.times],
+                "score": [round(float(x), 3) for x in r.score],
+                "candidates": [asdict(h) for h in self.candidates],
+                "shown": int(getattr(self, "_shown_total", 0))}
+
+    def _autosave(self):
+        if not self.project.source:
+            return
+        try:
+            self._collect_export_settings()
+            self.project.analysis = self._pack_analysis()
+            sig = json.dumps(asdict(self.project), sort_keys=True, default=str)
+            h = hashlib.md5(sig.encode()).hexdigest()
+            if h == self._session_sig:
+                return
+            tmp = self._session_file().with_suffix(".tmp")
+            tmp.write_text(sig, encoding="utf-8")
+            os.replace(tmp, self._session_file())
+            self._session_sig = h
+            self._save_setting("session_project_path", getattr(self, "project_path", "") or "")
+        except Exception as e:                      # never let autosave get in the way
+            self._log(f"(Couldn't save the session: {e})") if hasattr(self, "_log") else None
+
+    def _restore_session(self):
+        f = self._session_file()
+        if self.project.source or not f.exists():
+            return
+        try:
+            proj = editor.Project.load(f)
+        except Exception:
+            return
+        if not proj.source or not os.path.exists(proj.source):
+            return
+        self._use_project(proj, config.load_settings().get("session_project_path") or None)
+        n = len(proj.clips)
+        self._session_sig = ""
+        self.tabs.setCurrentIndex(1)
+        self._show_toast(f"↺ Picked up where you left off: {proj.title or Path(proj.source).name}"
+                         + (f" · {n} moment{'s' if n != 1 else ''}" if n else ""))
+
+    def _use_project(self, proj, path):
         self.load_video(proj.source, proj.title, proj.url, proj.offset, proj.segments)
         self.project = proj
         self.project_path = path
         self._apply_export_settings()
         self.candidates = []
+        an = proj.analysis or {}
+        if an.get("times") and an.get("score") and len(an["times"]) == len(an["score"]):
+            hs = []
+            for h in an.get("candidates", []):
+                try:
+                    hs.append(analysis.Highlight(**{k: v for k, v in h.items()
+                                                    if k in analysis.Highlight.__dataclass_fields__}))
+                except TypeError:
+                    pass
+            self.result = analysis.AnalysisResult(
+                duration=float(an.get("duration") or 0), times=np.asarray(an["times"], dtype=float),
+                score=np.asarray(an["score"], dtype=float), loudness=np.zeros(0), scene_times=[], highlights=hs)
+            self.candidates = hs
+            self._shown_total = int(an.get("shown", 0))
+            self.timeline.set_data(self.result.duration or (self.info.duration if self.info else 0),
+                                   self.result.times, self.result.score)
         self._fill_summary()
         self._fill_clip_list()
         self._update_more_button()
@@ -4052,10 +4134,7 @@ class MainWindow(QMainWindow):
         if busy and ask and QMessageBox.question(
                 self, "Relaunch", "A job is still running. Stop it and relaunch?") != QMessageBox.Yes:
             return
-        if self.project.clips and ask and QMessageBox.question(
-                self, "Relaunch", "Relaunching closes the current project. Save it first?",
-                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-            self.save_project()
+        self._autosave()                 # it reopens just as it was after the relaunch
         for w in busy:
             w.cancel()
         for w in busy:
@@ -4081,6 +4160,7 @@ class MainWindow(QMainWindow):
                 != QMessageBox.Yes:
             ev.ignore()
             return
+        self._autosave()
         for w in self.workers:
             w.cancel()
         for w in list(self.workers):
