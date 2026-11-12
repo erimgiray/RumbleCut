@@ -76,7 +76,7 @@ The **Only download part of the video** box and its times are remembered between
   3. It's kept between your **Min length** and **Max length**. If the full setup is longer than the maximum, the clip starts at the latest sentence that still keeps the payoff.
   4. Wherever the speech was transcribed, both ends land on **whole sentences**; elsewhere they move to natural pauses or scene cuts. Nobody is cut off mid-sentence.
   5. Passages the AI reads reach about 75 s before each lively stretch, so it hears what led up to it. Press **↻ Ask AI again** on an older scan to get the new timing.
-- **On the timeline:** right-click empty space to add a moment of your own there (shown blue and dashed, ✎). Click a moment to select it; the selected one is drawn on top, and you can drag it to move it or drag its edges to resize it (it can't go off the visible part). Right-click a moment for options: play it, cut its start or end at the clicked spot, split it in two, duplicate, untick or delete it.
+- **On the timeline:** right-click empty space to add a moment of your own there (shown blue and dashed, ✎). Click a moment to select it; the selected one is drawn on top, and you can drag it to move it or drag its edges to resize it (it can't go off the visible part). Right-click a moment (here, in the Moments list, or on its zoomed timeline) for options: play it, trim its start or end at the clicked spot or the playhead, split it in two, **↺ Reset** (timing back to how it was found, remove script cuts, effects back to normal, or everything), **💾 Save as clip…** (exports just that moment wherever you choose), duplicate, untick or delete it. While a clip plays, its box glows white with ▶ on both timelines so you can tell it from the others.
 - **Zoom the timeline:** scroll up on it to zoom in (around the mouse), down to zoom out, or use the **＋ / － / Fit** buttons beside it. Shift+scroll, or the scroll bar that appears under the timeline, moves left and right while zoomed (drag it, or click either side to jump a screen), and the view follows the playhead and the moment you select.
 - **Scrubber:** the bar under the player shows where you are; drag it (or drag across the main timeline) to move anywhere. Blue parts have video; the rest is audio only. Where there's nothing to show (an audio-only part, or nothing loaded), the player shows an icon and a note explaining why, and you get a notice when you scrub out of a part with video.
 - **The moment's own timeline:** click a moment and a zoomed timeline for it slides open under the main one. Drag its handles to set the exact start and end (in 0.1 s steps), drag the middle to move the whole moment, or click outside it to jump there. You hear the edge as you drag it.
@@ -95,6 +95,7 @@ The **Only download part of the video** box and its times are remembered between
 - **Preview with effects** renders a quick low-res version so you can check the look before exporting.
 
 **③ Export**
+- **Every clip has its own row:** a thumbnail, a file name you can change, and its own **shape** and **quality** (or *Same as all*, the defaults on the right). **💾 Export** saves just that clip; **✏** opens it in the Clip studio. Tick the ones you want and **Export ticked clips** does them together, as separate videos and/or one compilation.
 - **Shapes:** Original, 16:9, **9:16 vertical** (crop or blurred background), and 1:1.
 - **Settings:** 480p to 4K, 24 to 60 fps, quality, and an optional watermark such as `@yourchannel`.
 - **Exports:** each clip as its own MP4 (plus a thumbnail), and/or a **compilation** joined with 16 transitions (cross-fade, fade through black, wipes, slides, circle, radial, zoom, pixelate, blur, random mix and more).
@@ -209,6 +210,10 @@ Trim a clip by editing its transcript, like a document: delete words in the text
 5. **Jump cuts:** *punch-in zoom* (default) zooms in 8% on every other piece so cuts look like a camera change; *hard cut* just joins them. Cuts land at the quietest point between words, with a tiny audio fade, so nothing clicks.
 
 Context pictures stay on the words they belong to when you cut around them, and the export, Publish and preview all use the edited clip.
+
+**Where you are:** above the script, a strip of the whole stream shows every moment (the one you're editing is outlined; click another to switch, drag one to move it, right-click for options). Under it, the moment's own timeline shows the cuts hatched; drag its handles to change where it starts and ends. If you stretch it past the words in the script, press **📝 Get the script again**.
+
+**This moment's look** (beside the script): title, speed, zoom, colour look, vignette, fades and caption, kept in step with the Clip studio. **👁 Preview with effects** renders a small copy with everything applied and plays it there.
 
 ## Context images
 

@@ -7,12 +7,13 @@ import os
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
-from .. import ai, script_edit as se, transcribe
-from .timeline import fmt_time
+from .. import ai, editor, script_edit as se, transcribe
+from .timeline import ClipTimeline, Timeline, fmt_time
 from .workers import Worker
 
 try:
@@ -91,6 +92,12 @@ class ScriptPanel(QWidget):
         self._redo: list = []
         self._toks: list[dict] = []
         self._stop_at = None
+        self._preview = False              # playing the rendered "with effects" preview
+        self._loading = False
+        self._push_clip = None
+        self._push_timer = QTimer(self)
+        self._push_timer.setSingleShot(True)
+        self._push_timer.timeout.connect(self._do_push)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 8, 0, 0)
         v.setSpacing(8)
@@ -107,6 +114,26 @@ class ScriptPanel(QWidget):
         self.btn_load.clicked.connect(self.load_script)
         top.addWidget(self.btn_load)
         v.addLayout(top)
+
+        # where every moment sits in the stream (click one to switch, drag to move, right-click for options)
+        self.overview = Timeline()
+        self.overview.setMinimumHeight(60)
+        self.overview.setFixedHeight(74)
+        self.overview.clip_clicked.connect(self._overview_clicked)
+        self.overview.clip_menu.connect(lambda i, t, g: self._menu(i, g, t))
+        self.overview.clip_moved.connect(self._overview_moved)
+        self.overview.clip_move_done.connect(lambda i, a, b, w: self._span_done())
+        self.overview.add_at.connect(self._add_at)
+        v.addWidget(self.overview)
+        self.clip_tl_title = QLabel("")
+        self.clip_tl_title.setObjectName("muted")
+        v.addWidget(self.clip_tl_title)
+        self.clip_tl = ClipTimeline()
+        self.clip_tl.span_changed.connect(self._span_dragged)
+        self.clip_tl.span_committed.connect(lambda a, b, w: self._span_done())
+        self.clip_tl.seek.connect(self._tl_seek)
+        self.clip_tl.menu_requested.connect(lambda t, g: self._menu(None, g, t))
+        v.addWidget(self.clip_tl)
 
         tools = QHBoxLayout()
         self.btn_clean = QPushButton("🧹 Quick clean-up")
@@ -217,12 +244,18 @@ class ScriptPanel(QWidget):
         self.btn_play.clicked.connect(self.play_toggle)
         self.pos_label = QLabel("")
         self.pos_label.setObjectName("muted")
+        self.btn_fx = QPushButton("👁 Preview with effects")
+        self.btn_fx.setToolTip("Renders the moment with its cuts, speed, look, fades, caption and pictures "
+                               "(small, quick) and plays it here")
+        self.btn_fx.clicked.connect(self.preview_effects)
         trow.addWidget(self.btn_play)
+        trow.addWidget(self.btn_fx)
         trow.addWidget(self.pos_label, 1)
         rv.addLayout(trow)
         self.lengths = QLabel("")
         self.lengths.setWordWrap(True)
         rv.addWidget(self.lengths)
+        rv.addWidget(self._build_props())
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -247,15 +280,25 @@ class ScriptPanel(QWidget):
         self.moment.blockSignals(True)
         self.moment.clear()
         for i, c in enumerate(self.project.clips):
-            a = self.project.to_stream(c.start + c.offset)
-            cut = f"   ·   ✂ {c.length / max(.25, c.speed):.0f}s → {c.out_length:.0f}s" if c.cuts else ""
-            self.moment.addItem(f"{'☑' if c.enabled else '☐'} {i + 1}. {c.title}   ({fmt_time(a)}){cut}", id(c))
+            self.moment.addItem(self._label(i, c), id(c))
         idx = self.moment.findData(keep) if keep is not None else -1
         if idx < 0 and self.win.current_clip() is not None:
             idx = self.moment.findData(id(self.win.current_clip()))
         self.moment.setCurrentIndex(max(0, idx) if self.moment.count() else -1)
         self.moment.blockSignals(False)
         self._moment_changed()
+
+    def _label(self, i, c) -> str:
+        a = self.project.to_stream(c.start + c.offset)
+        cut = f"   ·   ✂ {c.length / max(.25, c.speed):.0f}s → {c.out_length:.0f}s" if c.cuts else ""
+        return f"{'☑' if c.enabled else '☐'} {i + 1}. {c.title}   ({fmt_time(a)}){cut}"
+
+    def _relabel(self, c):
+        if c in self.project.clips:
+            i = self.project.clips.index(c)
+            k = self.moment.findData(id(c))
+            if k >= 0:
+                self.moment.setItemText(k, self._label(i, c))
 
     def select_clip(self, c):
         i = self.moment.findData(id(c))
@@ -267,6 +310,9 @@ class ScriptPanel(QWidget):
         self._undo.clear()
         self._redo.clear()
         self._stop()
+        self._preview = False
+        self._sync_views()
+        self._load_props(c)
         if c is not None:
             self.jump.blockSignals(True)
             self.jump.setCurrentIndex(max(0, self.jump.findData(c.jump_cut)))
@@ -289,6 +335,8 @@ class ScriptPanel(QWidget):
         self.btn_load.setText("📝 Get the script again" if has_words else "📝 Get the script")
         for b in (self.btn_clean, self.btn_ai, self.btn_cut, self.btn_restore, self.btn_play):
             b.setEnabled(has_words and not busy)
+        self.btn_fx.setEnabled(c is not None and not busy)
+        self.props.setEnabled(c is not None)
         has_s = bool(c and c.cut_suggestions)
         for b in (self.btn_accept_all, self.btn_dismiss_all, self.btn_accept, self.btn_reject):
             b.setEnabled(has_s and not busy)
@@ -630,6 +678,7 @@ class ScriptPanel(QWidget):
         c = self.current_clip()
         if not (self.player and c):
             return
+        self._restore_source()
         for a, b in c.cuts:
             if a <= t < b:
                 t = b
@@ -644,6 +693,8 @@ class ScriptPanel(QWidget):
         self._stop_at = None
         self.btn_play.setText("▶ Play the edit")
         self.view.setExtraSelections([])
+        self.clip_tl.set_playing(False)
+        self.overview.set_playing(-1)
 
     def _token_clicked(self, k):
         tk = self._toks[k]
@@ -652,6 +703,9 @@ class ScriptPanel(QWidget):
 
     def _pos(self, ms):
         c = self.current_clip()
+        if self._preview and c:
+            self.pos_label.setText(f"👁 with effects  {fmt_time(ms / 1000)} / {fmt_time(c.out_length)}")
+            return
         if not c or self._stop_at is None:
             return
         t = ms / 1000
@@ -664,6 +718,10 @@ class ScriptPanel(QWidget):
             return
         out = c.to_out(t)
         self.pos_label.setText(f"{fmt_time(out)} / {fmt_time(c.out_length)}")
+        self.clip_tl.set_playhead(t + c.offset)
+        self.clip_tl.set_playing(True)
+        self.overview.set_playhead(t + c.offset)
+        self.overview.set_playing(self.project.clips.index(c) if c in self.project.clips else -1)
         k = next((i for i, tk in enumerate(self._toks) if tk["start"] <= t <= tk["end"] + 0.05), None)
         if k is not None and k < len(self.view.spans):
             sel = QTextEdit.ExtraSelection()
@@ -674,3 +732,273 @@ class ScriptPanel(QWidget):
             sel.cursor = cur
             sel.format.setBackground(QBrush(QColor(COL["now"])))
             self.view.setExtraSelections([sel])
+
+    # ------------------------------------------------------------------ where the moment is
+    def _sync_views(self, keep_view: bool = False):
+        win, c = self.win, self.current_clip()
+        tl, ov = win.timeline, self.overview
+        have = bool(tl.duration) and bool(self.project.source)
+        ov.setVisible(have)
+        self.clip_tl.setVisible(have and c is not None)
+        self.clip_tl_title.setVisible(have and c is not None)
+        if not have:
+            return
+        if abs(ov.duration - tl.duration) > 0.01 or ov.times is not tl.times:
+            ov.set_data(tl.duration, tl.times, tl.score)
+        ov.time_fn, ov.joins, ov.sections = tl.time_fn, list(tl.joins), list(tl.sections)
+        clips = self.project.clips
+        ov.limits = [win._clip_limits(x) for x in clips]
+        idx = clips.index(c) if c in clips else -1
+        ov.set_clips(win._spans(), idx, [win._why_html(x) for x in clips], [x.origin for x in clips])
+        if c is None:
+            return
+        a, b = c.start + c.offset, c.end + c.offset
+        if ov.zoom > 1.001 and not (ov.view[0] <= a and b <= ov.view[1]):
+            span = max(ov.view[1] - ov.view[0], (b - a) * 1.4)
+            ov.set_view((a + b) / 2 - span / 2, (a + b) / 2 + span / 2)
+        ct = self.clip_tl
+        ct.time_fn, ct.end_fn = win.clip_tl.time_fn, win.clip_tl.end_fn
+        ct.cuts = [(x + c.offset, y + c.offset) for x, y in c.cuts]
+        ct.set_clip(a, b, win._clip_limits(c), tl.times, tl.score, user=c.origin, keep_view=keep_view)
+        who = {"user": "★ Your pick", "manual": "✎ Your moment"}.get(c.origin, f"Moment {idx + 1}")
+        self.clip_tl_title.setText(f"{who} of {len(clips)} - drag the handles to change where it starts and ends"
+                                   + (" · hatched = cut" if c.cuts else "") + " · right-click for options")
+
+    def _overview_clicked(self, i: int):
+        if 0 <= i < len(self.project.clips):
+            self.select_clip(self.project.clips[i])
+
+    def _overview_moved(self, i: int, a: float, b: float, what: str):
+        if not (0 <= i < len(self.project.clips)):
+            return
+        c = self.project.clips[i]
+        if c is not self.current_clip():
+            self.select_clip(c)
+        c.start, c.end = round(a - c.offset, 2), round(b - c.offset, 2)
+        self.clip_tl.cuts = [(x + c.offset, y + c.offset) for x, y in c.cuts]
+        self.clip_tl.set_clip(a, b, self.win._clip_limits(c), self.win.timeline.times, self.win.timeline.score,
+                              user=c.origin, keep_view=True)
+        self._lengths()
+
+    def _span_dragged(self, a: float, b: float, what: str):
+        c = self.current_clip()
+        if not c:
+            return
+        self._stop()
+        c.start, c.end = round(a - c.offset, 2), round(b - c.offset, 2)
+        clips = self.project.clips
+        self.overview.set_clips(self.win._spans(), clips.index(c) if c in clips else -1,
+                                self.overview.tips, self.overview.user)
+        self._lengths()
+
+    def _span_done(self):
+        c = self.current_clip()
+        if not c:
+            return
+        note = "You set the start and end yourself on the moment's timeline."
+        if note not in c.timing:
+            c.timing = list(c.timing) + [note]
+        self._render()
+        self._sync_views(keep_view=True)
+        self._relabel(c)
+        self._words_note(c)
+        self._push(c)
+
+    def _words_note(self, c):
+        if not c.words:
+            return
+        w0, w1 = min(w[0] for w in c.words), max(w[1] for w in c.words)
+        if c.start < w0 - 1.5 or c.end > w1 + 1.5:
+            self.status.setText("The moment now runs past the script - press 📝 Get the script again to see "
+                                "the new words")
+        elif self.status.text().startswith("The moment now runs past"):
+            self.status.setText("")
+
+    def _tl_seek(self, t: float):
+        c = self.current_clip()
+        if not (c and self.player):
+            return
+        ft = t - c.offset
+        if c.start <= ft < c.end - 0.1:
+            self._play_from(ft)
+        else:
+            self._stop()
+            self._restore_source()
+            self.player.setPosition(int(ft * 1000))
+            self.clip_tl.set_playhead(t)
+
+    def _add_at(self, t: float):
+        self.win.add_clip_at(t)
+        self.refresh()
+        self.select_clip(self.win.current_clip())
+
+    def _menu(self, i, gpos, t=None):
+        clips = self.project.clips
+        c = clips[i] if i is not None and 0 <= i < len(clips) else self.current_clip()
+        if c is None:
+            return
+        self.select_clip(c)
+        self.win._clip_menu(c, gpos, t, play=lambda: self._play_moment(c))
+        if self.win.tabs.currentIndex() == self.win.ctx_index:
+            self.refresh()
+
+    def _play_moment(self, c):
+        self.select_clip(c)
+        if c.words:
+            self._play_from(c.kept[0][0])
+        elif self.player:
+            self._restore_source()
+            self._stop_at = c.end
+            self.player.setPosition(int(c.start * 1000))
+            self.player.play()
+            self.btn_play.setText("■ Stop")
+
+    # ------------------------------------------------------------------ the moment's look
+    def _build_props(self) -> QWidget:
+        self.props = QGroupBox("This moment's look")
+        g = QGridLayout(self.props)
+        g.setHorizontalSpacing(8)
+        g.setVerticalSpacing(6)
+        self.p_title = QLineEdit()
+        self.p_title.setPlaceholderText("Title (also the file name)")
+        self.p_speed = QComboBox()
+        self.p_speed.addItems(["0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"])
+        self.p_zoom = QSpinBox()
+        self.p_zoom.setRange(100, 200)
+        self.p_zoom.setSingleStep(5)
+        self.p_zoom.setSuffix(" %")
+        self.p_zoom.setToolTip("Punch-in zoom for the whole moment")
+        self.p_color = QComboBox()
+        self.p_color.addItems(list(editor.COLOR_LOOKS))
+        self.p_vig = QCheckBox("Vignette")
+        self.p_fin, self.p_fout = QDoubleSpinBox(), QDoubleSpinBox()
+        for sb in (self.p_fin, self.p_fout):
+            sb.setRange(0, 5)
+            sb.setSingleStep(0.1)
+            sb.setSuffix(" s")
+        self.p_caption = QPlainTextEdit()
+        self.p_caption.setPlaceholderText("Caption (optional)")
+        self.p_caption.setFixedHeight(48)
+        self.p_cappos = QComboBox()
+        self.p_cappos.addItems(["bottom", "top"])
+        more = QPushButton("More in the Clip studio →")
+        more.setToolTip("Transitions, loudness and pictures on screen")
+        more.clicked.connect(self._open_in_studio)
+        lab = lambda t: QLabel(t)
+        g.addWidget(lab("Title"), 0, 0)
+        g.addWidget(self.p_title, 0, 1, 1, 3)
+        g.addWidget(lab("Speed"), 1, 0)
+        g.addWidget(self.p_speed, 1, 1)
+        g.addWidget(lab("Zoom"), 1, 2)
+        g.addWidget(self.p_zoom, 1, 3)
+        g.addWidget(lab("Look"), 2, 0)
+        g.addWidget(self.p_color, 2, 1)
+        g.addWidget(self.p_vig, 2, 2, 1, 2)
+        g.addWidget(lab("Fade in"), 3, 0)
+        g.addWidget(self.p_fin, 3, 1)
+        g.addWidget(lab("Fade out"), 3, 2)
+        g.addWidget(self.p_fout, 3, 3)
+        g.addWidget(lab("Caption"), 4, 0)
+        g.addWidget(self.p_caption, 4, 1, 1, 2)
+        g.addWidget(self.p_cappos, 4, 3, Qt.AlignTop)
+        g.addWidget(more, 5, 0, 1, 4)
+        g.setColumnStretch(1, 1)
+        g.setColumnStretch(3, 1)
+        self.p_title.textEdited.connect(lambda t: self._pset("title", t))
+        self.p_speed.currentTextChanged.connect(lambda t: self._pset("speed", float(t.rstrip("×"))))
+        self.p_zoom.valueChanged.connect(lambda x: self._pset("zoom", x / 100))
+        self.p_color.currentTextChanged.connect(lambda t: self._pset("color", t))
+        self.p_vig.toggled.connect(lambda b: self._pset("vignette", b))
+        self.p_fin.valueChanged.connect(lambda x: self._pset("fade_in", x))
+        self.p_fout.valueChanged.connect(lambda x: self._pset("fade_out", x))
+        self.p_caption.textChanged.connect(lambda: self._pset("caption", self.p_caption.toPlainText()))
+        self.p_cappos.currentTextChanged.connect(lambda t: self._pset("caption_pos", t))
+        return self.props
+
+    def _load_props(self, c):
+        self._loading = True
+        try:
+            if c is None:
+                self.p_title.clear()
+                self.p_caption.clear()
+                return
+            self.p_title.setText(c.title)
+            self.p_title.setCursorPosition(0)
+            self.p_speed.setCurrentText(f"{c.speed:g}×")
+            self.p_zoom.setValue(int(round(c.zoom * 100)))
+            self.p_color.setCurrentText(c.color)
+            self.p_vig.setChecked(c.vignette)
+            self.p_fin.setValue(c.fade_in)
+            self.p_fout.setValue(c.fade_out)
+            if self.p_caption.toPlainText() != c.caption:
+                self.p_caption.setPlainText(c.caption)
+            self.p_cappos.setCurrentText(c.caption_pos)
+        finally:
+            self._loading = False
+
+    def _pset(self, attr, value):
+        if self._loading:
+            return
+        c = self.current_clip()
+        if not c:
+            return
+        setattr(c, attr, value)
+        if attr in ("speed", "title"):
+            self._lengths()
+            self._relabel(c)
+        self._push(c)
+
+    def _open_in_studio(self):
+        c = self.current_clip()
+        self._stop()
+        self.win.tabs.setCurrentIndex(1)
+        if c in self.project.clips:
+            self.win.clip_list.setCurrentRow(self.project.clips.index(c))
+
+    def _push(self, c):
+        """Tell the Clip studio (moment list, timeline, inspector) about a change - batched while typing."""
+        self._push_clip = c
+        self._push_timer.start(250)
+
+    def _do_push(self):
+        c, win = self._push_clip, self.win
+        if c not in self.project.clips:
+            return
+        r = self.project.clips.index(c)
+        win._clip_edited(c)
+        if win.clip_list.currentRow() == r:
+            win.select_clip(r)
+        else:
+            win._sync_timeline(win.clip_list.currentRow())
+
+    # ------------------------------------------------------------------ preview with effects
+    def _restore_source(self):
+        c = self.current_clip()
+        if self._preview and self.player and c:
+            self._preview = False
+            self.player.setSource(QUrl.fromLocalFile(c.source))
+
+    def preview_effects(self):
+        c = self.current_clip()
+        if not c or (self._worker is not None and self._worker.isRunning()):
+            return
+        self._stop()
+        st = editor.ExportSettings(**{**self.project.export.__dict__})
+        st.height, st.quality = 480, "small"
+        out = self.win.thumb_dir / f"fxpreview_{abs(hash((id(c), len(c.cuts))))}.mp4"
+
+        def job(on_progress=None, cancel=None):
+            return editor.render_clip(c, st, out, on_progress=lambda f: on_progress(f, "Rendering the preview…"),
+                                      cancel=cancel)
+
+        def done(path):
+            self.progress.setValue(1000)
+            self.status.setText("👁 Playing the moment with its effects - ▶ Play the edit goes back to the script")
+            if c is not self.current_clip() or not self.player:
+                return
+            self._preview = True
+            self.stack.setCurrentIndex(0)
+            self.player.setSource(QUrl.fromLocalFile(str(path)))
+            self.player.play()
+            self.btn_play.setText("■ Stop")
+        self._run(job, done, "Rendering the preview…")

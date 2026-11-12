@@ -464,6 +464,7 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and (
             self.script_tab if self.edit_tabs.currentIndex() == 0 else self.ctx_tab).refresh())
         self.tabs.currentChanged.connect(lambda i: i == self.pub_index and self.pub_tab.refresh())
+        self.tabs.currentChanged.connect(lambda i: self.tabs.tabText(i).strip().endswith("Export") and self._fill_export_rows())
         self._build_menu()
         self._update_no_video("")
         from PySide6.QtWidgets import QAbstractSpinBox
@@ -1143,6 +1144,7 @@ class MainWindow(QMainWindow):
         self.clip_tl.span_changed.connect(self._clip_span_dragged)
         self.clip_tl.span_committed.connect(self._clip_span_committed)
         self.clip_tl.seek.connect(self.scrub_to)
+        self.clip_tl.menu_requested.connect(lambda t, g: self.current_clip() and self._clip_menu(self.current_clip(), g, t))
         ctl.addWidget(self.clip_tl)
         self.clip_tl_box.setMaximumHeight(0)
         self._clip_tl_h = 96
@@ -1168,6 +1170,8 @@ class MainWindow(QMainWindow):
         self.clip_list.model().rowsMoved.connect(self._rows_moved)
         self.clip_list.currentRowChanged.connect(self.select_clip)
         self.clip_list.itemChanged.connect(self._item_checked)
+        self.clip_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.clip_list.customContextMenuRequested.connect(self._list_clip_menu)
         lv.addWidget(self.clip_list, 1)
         self.btn_more = QPushButton("＋ 5 more moments")
         self.btn_more.setObjectName("more")
@@ -1243,6 +1247,7 @@ class MainWindow(QMainWindow):
                 self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video)
             self.player.positionChanged.connect(self._pos_changed)
+            self.player.playbackStateChanged.connect(lambda _: self._pos_changed(self.player.position()))
             self.video_stack = QStackedWidget()
             self.video_stack.addWidget(self.video)
         else:
@@ -1700,6 +1705,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ clip list
     def _fill_clip_list(self, keep_row=False):
+        for c in self.project.clips:              # remember how each moment was first found (for ↺ Reset)
+            if len(c.orig) != 2:
+                c.orig = [c.start, c.end]
         row = self.clip_list.currentRow()
         self.clip_list.blockSignals(True)
         self.clip_list.clear()
@@ -2043,24 +2051,62 @@ class MainWindow(QMainWindow):
         self._show_toast("✎ New moment added - drag it on the timeline to move it")
 
     def _timeline_clip_menu(self, i: int, t: float, gpos):
-        """Right-click on a moment in the timeline."""
-        if not (0 <= i < len(self.project.clips)):
+        """Right-click on a moment in the timeline (t = where on the project timeline)."""
+        if 0 <= i < len(self.project.clips):
+            self._clip_menu(self.project.clips[i], gpos, t)
+
+    def _list_clip_menu(self, pos):
+        it = self.clip_list.itemAt(pos)
+        if it is not None:
+            self._clip_menu(self.project.clips[self.clip_list.row(it)], self.clip_list.viewport().mapToGlobal(pos))
+
+    def _clip_menu(self, c, gpos, t: float | None = None, play=None):
+        """The same right-click menu everywhere a moment appears (play = how to play it there)."""
+        if c not in self.project.clips:
             return
-        self.clip_list.setCurrentRow(i)
-        c = self.project.clips[i]
-        pos_in = t - c.offset                       # clicked spot in the clip's own file time
-        inside = c.start + 1.0 < pos_in < c.end - 1.0
-        here = fmt_time(self.project.to_stream(t))
+        r = self.project.clips.index(c)
+        if self.clip_list.currentRow() != r:
+            self.clip_list.setCurrentRow(r)
         m = QMenu(self)
-        m.addAction("▶  Play this moment", self.play_clip)
+        m.addAction("▶  Play this moment", play or self.play_clip)
+        # --- trim
+        tm = m.addMenu("✂  Trim")
+        if t is not None:
+            pos_in = t - c.offset
+            here = fmt_time(self.project.to_stream(t))
+            inside = c.start + 1.0 < pos_in < c.end - 1.0
+            a = tm.addAction(f"Start here ({here})", lambda: self._trim_clip(c, "start", pos_in))
+            a.setEnabled(inside)
+            a = tm.addAction(f"End here ({here})", lambda: self._trim_clip(c, "end", pos_in))
+            a.setEnabled(inside)
+        ph = self._player_pos() if self.player and self._media_offset is not None else None
+        ph_in = ph is not None and c.start + 1.0 < ph < c.end - 1.0 and \
+            self.player.source() == QUrl.fromLocalFile(c.source)
+        a = tm.addAction("Start at the playhead", lambda: self._trim_clip(c, "start", ph))
+        a.setEnabled(bool(ph_in))
+        a = tm.addAction("End at the playhead", lambda: self._trim_clip(c, "end", ph))
+        a.setEnabled(bool(ph_in))
+        tm.addSeparator()
+        tm.addAction("Cut words by script…", self.edit_script_for_current)
+        if t is not None:
+            pos_in = t - c.offset
+            a = m.addAction(f"⫽  Split into two at {fmt_time(self.project.to_stream(t))}",
+                            lambda: self._split_clip(c, pos_in))
+            a.setEnabled(c.start + 1.0 < pos_in < c.end - 1.0)
+        # --- reset
+        rm = m.addMenu("↺  Reset")
+        o = c.orig if len(c.orig) == 2 else [c.start, c.end]
+        moved = abs(o[0] - c.start) > 0.05 or abs(o[1] - c.end) > 0.05
+        a = rm.addAction(f"Timing back to how it was found ({fmt_time(self.project.to_stream(o[0] + c.offset))} – "
+                         f"{fmt_time(self.project.to_stream_end(o[1] + c.offset))})", lambda: self._reset_clip(c, "timing"))
+        a.setEnabled(moved)
+        a = rm.addAction(f"Remove script cuts ({len(c.cuts)})", lambda: self._reset_clip(c, "cuts"))
+        a.setEnabled(bool(c.cuts))
+        rm.addAction("Effects back to normal", lambda: self._reset_clip(c, "effects"))
+        rm.addSeparator()
+        rm.addAction("Everything", lambda: self._reset_clip(c, "all"))
         m.addSeparator()
-        a = m.addAction(f"✂  Cut the start - begin at {here}", lambda: self._trim_clip(c, "start", pos_in))
-        a.setEnabled(inside)
-        a = m.addAction(f"✂  Cut the end - stop at {here}", lambda: self._trim_clip(c, "end", pos_in))
-        a.setEnabled(inside)
-        a = m.addAction(f"⫽  Split into two at {here}", lambda: self._split_clip(c, pos_in))
-        a.setEnabled(inside)
-        m.addSeparator()
+        m.addAction("💾  Save as clip…", lambda: self.save_clip_as(c))
         m.addAction("⧉  Duplicate", self.duplicate_clip)
         m.addAction("☐  Untick (don't export)" if c.enabled else "☑  Tick (export it)",
                     lambda: self.clip_list.item(self.project.clips.index(c)).setCheckState(
@@ -2068,6 +2114,49 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("🗑  Delete this moment", self.remove_clip)
         self._exec_menu(m, gpos)
+
+    def _reset_clip(self, c, what: str):
+        if c not in self.project.clips:
+            return
+        if what in ("timing", "all") and len(c.orig) == 2:
+            c.start, c.end = float(c.orig[0]), float(c.orig[1])
+        if what in ("cuts", "all"):
+            from .. import script_edit as se
+            se.apply_cuts(c, [])
+            c.cut_suggestions = []
+        if what in ("effects", "all"):
+            fresh = editor.Clip(source=c.source, start=c.start, end=c.end)
+            for f_ in editor.Clip.EFFECT_FIELDS:
+                setattr(c, f_, getattr(fresh, f_))
+        r = self.project.clips.index(c)
+        self.select_clip(r)
+        self._update_item_text(r)
+        self._show_toast({"timing": "↺ Timing reset", "cuts": "↺ Script cuts removed",
+                          "effects": "↺ Effects reset", "all": "↺ Moment reset"}[what])
+
+    def save_clip_as(self, c):
+        """💾 Export one moment on its own, with its own export options."""
+        if c not in self.project.clips:
+            return
+        i = self.project.clips.index(c) + 1
+        default = Path(self.e_out.text().strip() or str(config.export_dir())) / \
+            ft.safe_filename(self.project.title or "RumbleCut", 60) / f"{editor.clip_filename(c, i)}.mp4"
+        path, _ = QFileDialog.getSaveFileName(self, "Save clip as", str(default), "MP4 video (*.mp4)")
+        if not path:
+            return
+        if not path.lower().endswith(".mp4"):
+            path += ".mp4"
+        self._collect_export_settings()
+        w = Worker(editor.export_clip, self.project, c, path)
+        w.progress.connect(lambda f, msg: self._show_toast(f"💾 {msg} {f * 100:.0f}%") if int(f * 100) % 20 == 0 else None)
+
+        def done(out):
+            self._show_toast(f"💾 Saved “{Path(out).name}”")
+            self._add_exported([out])
+        w.done.connect(done)
+        w.failed.connect(lambda msg: QMessageBox.warning(self, "Save clip", msg))
+        self._show_toast(f"💾 Saving “{c.title}”…")
+        self._start(w)
 
     def _exec_menu(self, m, gpos):
         m.exec(gpos)
@@ -2290,6 +2379,19 @@ class MainWindow(QMainWindow):
         self.timeline.set_playhead(t)
         self.scrubber.set_position(t)
         self.clip_tl.set_playhead(t)
+        # light up the moment that's playing
+        playing = bool(self.player) and self.player.playbackState() == QMediaPlayer.PlayingState
+        idx = -1
+        if playing:
+            sel = self.clip_list.currentRow()
+            spans = self._spans()
+            if 0 <= sel < len(spans) and spans[sel][0] <= t <= spans[sel][1]:
+                idx = sel
+            else:
+                idx = next((i for i, (a, b) in enumerate(spans) if a <= t <= b), -1)
+        self.timeline.set_playing(idx)
+        c = self.current_clip()
+        self.clip_tl.set_playing(playing and c is not None and c.start + c.offset <= t <= c.end + c.offset)
 
     def scrub_to(self, t: float):
         """Jump to project time t - shows a fetched video for that part if there is one."""
@@ -2489,12 +2591,42 @@ class MainWindow(QMainWindow):
     def _build_export_tab(self) -> QWidget:
         w = QWidget()
         outer = QHBoxLayout(w)
-        outer.setContentsMargins(30, 20, 30, 20)
+        outer.setContentsMargins(24, 16, 24, 16)
+        outer.setSpacing(18)
+
+        # ---- left: every clip with its own options
         left = QVBoxLayout()
-        title = QLabel("Export your best clips")
+        title = QLabel("Export")
         title.setObjectName("h1")
         left.addWidget(title)
-        g = QGroupBox("Format")
+        hrow = QHBoxLayout()
+        hl = QLabel("Each clip can have its own name, shape and quality - “Same as all” uses the defaults on "
+                    "the right. Export one with 💾, or tick several and export them together.")
+        hl.setObjectName("muted")
+        hl.setWordWrap(True)
+        hrow.addWidget(hl, 1)
+        b_all = QPushButton("Tick all")
+        b_all.clicked.connect(lambda: self._tick_all_export(True))
+        b_none = QPushButton("Untick all")
+        b_none.clicked.connect(lambda: self._tick_all_export(False))
+        hrow.addWidget(b_all)
+        hrow.addWidget(b_none)
+        left.addLayout(hrow)
+        self.ex_rows_box = QVBoxLayout()
+        self.ex_rows_box.setSpacing(6)
+        self.ex_rows_box.addStretch()
+        rows_w = QWidget()
+        rows_w.setLayout(self.ex_rows_box)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setWidget(rows_w)
+        left.addWidget(sc, 1)
+        self.ex_rows: list[dict] = []
+        outer.addLayout(left, 5)
+
+        # ---- right: defaults, group export, results
+        right = QVBoxLayout()
+        g = QGroupBox("Defaults for all clips")
         fl = QFormLayout(g)
         self.e_aspect = QComboBox(); self.e_aspect.addItems(list(editor.ASPECTS))
         self.e_res = QComboBox(); self.e_res.addItems(["2160", "1440", "1080", "720", "480"])
@@ -2508,17 +2640,17 @@ class MainWindow(QMainWindow):
         fl.addRow("Frame rate", self.e_fps)
         fl.addRow("Quality", self.e_quality)
         fl.addRow("Watermark text", self.e_wm)
-        hint = QLabel("Vertical 9:16 is ready for YouTube Shorts / TikTok / Reels. Resolution is the "
-                      "short side for vertical and square.")
+        hint = QLabel("Vertical 9:16 suits Shorts, TikTok and Reels. Resolution is the short side for "
+                      "vertical and square.")
         hint.setWordWrap(True); hint.setObjectName("muted")
         fl.addRow("", hint)
-        left.addWidget(g)
+        right.addWidget(g)
 
-        g2 = QGroupBox("What to export")
+        g2 = QGroupBox("Export the ticked clips")
         fl2 = QFormLayout(g2)
-        self.e_indiv = QCheckBox("Each ticked clip as its own video"); self.e_indiv.setChecked(True)
-        self.e_thumbs = QCheckBox("Save a thumbnail image with each clip"); self.e_thumbs.setChecked(True)
-        self.e_comp = QCheckBox("A 'Best moments' compilation joined with transitions")
+        self.e_indiv = QCheckBox("Each as its own video"); self.e_indiv.setChecked(True)
+        self.e_thumbs = QCheckBox("A thumbnail image with each"); self.e_thumbs.setChecked(True)
+        self.e_comp = QCheckBox("Joined into one ‘Best moments’ video")
         self.e_trans = QComboBox(); self.e_trans.addItems([k for k in editor.TRANSITIONS])
         self.e_trans.setCurrentText("Cross-fade")
         self.e_tdur = QDoubleSpinBox(); self.e_tdur.setRange(0.1, 3); self.e_tdur.setSingleStep(0.1)
@@ -2526,43 +2658,181 @@ class MainWindow(QMainWindow):
         fl2.addRow(self.e_indiv)
         fl2.addRow(self.e_thumbs)
         fl2.addRow(self.e_comp)
-        fl2.addRow("Default transition", self.e_trans)
+        fl2.addRow("Transition", self.e_trans)
         fl2.addRow("Transition length", self.e_tdur)
-        left.addWidget(g2)
-
         orow = QHBoxLayout()
         self.e_out = QLineEdit(str(config.export_dir()))
         b = QPushButton("Browse…")
         b.clicked.connect(lambda: (d := QFileDialog.getExistingDirectory(self, "Export folder", self.e_out.text()))
                           and self.e_out.setText(d))
-        orow.addWidget(QLabel("Save to")); orow.addWidget(self.e_out, 1); orow.addWidget(b)
-        left.addLayout(orow)
+        orow.addWidget(self.e_out, 1); orow.addWidget(b)
+        fl2.addRow("Save to", orow)
+        right.addWidget(g2)
         brow = QHBoxLayout()
-        self.btn_export = QPushButton("Export")
+        self.btn_export = QPushButton("Export ticked clips")
         self.btn_export.setObjectName("primary")
         self.btn_export.setMinimumHeight(40)
         self.btn_export.clicked.connect(self.run_export)
         self.btn_ex_cancel = QPushButton("Cancel"); self.btn_ex_cancel.setEnabled(False)
         brow.addWidget(self.btn_export, 1); brow.addWidget(self.btn_ex_cancel)
-        left.addLayout(brow)
+        right.addLayout(brow)
         self.ex_progress = QProgressBar(); self.ex_progress.setRange(0, 1000)
         self.ex_status = QLabel("")
-        left.addWidget(self.ex_progress)
-        left.addWidget(self.ex_status)
-        left.addStretch()
-        outer.addLayout(left, 3)
-
-        right = QVBoxLayout()
+        self.ex_status.setWordWrap(True)
+        right.addWidget(self.ex_progress)
+        right.addWidget(self.ex_status)
         right.addWidget(section("Exported files"))
         self.ex_files = QListWidget()
         self.ex_files.itemDoubleClicked.connect(lambda it: QDesktopServices.openUrl(
             QUrl.fromLocalFile(it.data(Qt.UserRole))))
+        self.ex_files.setToolTip("Double-click to play")
         right.addWidget(self.ex_files, 1)
         self.btn_open_out = QPushButton("Open export folder")
         self.btn_open_out.clicked.connect(lambda: open_folder(getattr(self, "_last_out", self.e_out.text())))
         right.addWidget(self.btn_open_out)
-        outer.addLayout(right, 2)
+        outer.addLayout(right, 3)
         return w
+
+    # ---- export rows
+    def _fill_export_rows(self):
+        for r in self.ex_rows:
+            r["w"].deleteLater()
+        self.ex_rows = []
+        thumbs = getattr(self, "_thumbs", {})
+        if not self.project.clips:
+            lab = QLabel("No clips yet - find highlights or add clips in the Clip studio.")
+            lab.setObjectName("muted")
+            self.ex_rows_box.insertWidget(0, lab)
+            self.ex_rows.append({"w": lab})
+            return
+        for i, c in enumerate(self.project.clips):
+            row = QFrame()
+            row.setObjectName("exrow")
+            g = QGridLayout(row)
+            g.setContentsMargins(8, 6, 8, 6)
+            g.setHorizontalSpacing(8)
+            tick = QCheckBox()
+            tick.setChecked(c.enabled)
+            tick.setToolTip("Export this clip with the others")
+            th = QLabel()
+            th.setFixedSize(96, 54)
+            tp = thumbs.get((c.source, round((c.start + c.end) / 2, 1)))
+            pm = QPixmap(tp) if tp else None
+            if pm is not None and not pm.isNull():
+                th.setPixmap(pm.scaled(96, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                th.setText("🎬" if self._has_video(c.source) else "🔊")
+                th.setAlignment(Qt.AlignCenter)
+            name = QLineEdit((c.export_opts or {}).get("name", ""))
+            name.setPlaceholderText(c.title or f"Highlight {i + 1}")
+            name.setToolTip("File name (leave empty to use the clip's title)")
+            a = self.project.to_stream(c.start + c.offset)
+            info = QLabel(f"#{i + 1} · {fmt_time(a)} · {c.out_length:.0f}s" + (" · ✂" if c.cuts else "")
+                          + (" · 🖼" if any(o.status == 'approved' for o in c.overlays) else "")
+                          + ("" if self._has_video(c.source) else " · 🔊 audio only"))
+            info.setObjectName("muted")
+            shape = QComboBox()
+            shape.addItem("Shape: same as all", "")
+            for k in editor.ASPECTS:
+                shape.addItem(k, k)
+            shape.setCurrentIndex(max(0, shape.findData((c.export_opts or {}).get("aspect", ""))))
+            qual = QComboBox()
+            qual.addItem("Quality: same as all", "")
+            for k in ("high", "balanced", "small"):
+                qual.addItem(k, k)
+            qual.setCurrentIndex(max(0, qual.findData((c.export_opts or {}).get("quality", ""))))
+            b_exp = QPushButton("💾 Export")
+            b_exp.setToolTip("Export just this clip now, with its own options")
+            b_edit = QPushButton("✏")
+            b_edit.setToolTip("Open it in the Clip studio")
+            b_edit.setFixedWidth(36)
+            status = QLabel("")
+            status.setObjectName("muted")
+            g.addWidget(tick, 0, 0, 2, 1)
+            g.addWidget(th, 0, 1, 2, 1)
+            g.addWidget(name, 0, 2, 1, 2)
+            g.addWidget(b_exp, 0, 4)
+            g.addWidget(b_edit, 0, 5)
+            g.addWidget(info, 1, 2)
+            g.addWidget(shape, 1, 3)
+            g.addWidget(qual, 1, 4, 1, 2)
+            g.addWidget(status, 2, 2, 1, 4)
+            status.hide()
+            g.setColumnStretch(2, 3)
+            g.setColumnStretch(3, 2)
+
+            def opt(key, val, c=c):
+                o = dict(c.export_opts or {})
+                if val:
+                    o[key] = val
+                else:
+                    o.pop(key, None)
+                c.export_opts = o
+            name.textEdited.connect(lambda t, opt=opt: opt("name", t.strip()))
+            shape.currentIndexChanged.connect(lambda _, cb=shape, opt=opt: opt("aspect", cb.currentData()))
+            qual.currentIndexChanged.connect(lambda _, cb=qual, opt=opt: opt("quality", cb.currentData()))
+            tick.toggled.connect(lambda on, c=c: self._set_enabled(c, on))
+            b_exp.clicked.connect(lambda _=False, c=c: self._export_one(c))
+            b_edit.clicked.connect(lambda _=False, c=c: (self.tabs.setCurrentIndex(1),
+                                                         self.clip_list.setCurrentRow(self.project.clips.index(c))))
+            self.ex_rows_box.insertWidget(self.ex_rows_box.count() - 1, row)
+            self.ex_rows.append({"w": row, "clip": c, "tick": tick, "status": status, "button": b_exp})
+        n = sum(1 for c in self.project.clips if c.enabled)
+        self.btn_export.setText(f"Export {n} ticked clip{'s' if n != 1 else ''}")
+
+    def _set_enabled(self, c, on: bool):
+        if c in self.project.clips:
+            r = self.project.clips.index(c)
+            it = self.clip_list.item(r)
+            if it is not None and (it.checkState() == Qt.Checked) != on:
+                it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+            c.enabled = on
+        n = sum(1 for x in self.project.clips if x.enabled)
+        self.btn_export.setText(f"Export {n} ticked clip{'s' if n != 1 else ''}")
+
+    def _tick_all_export(self, on: bool):
+        for r in self.ex_rows:
+            if "tick" in r:
+                r["tick"].setChecked(on)
+
+    def _export_one(self, c):
+        row = next((r for r in self.ex_rows if r.get("clip") is c), None)
+        self._collect_export_settings()
+        i = self.project.clips.index(c) + 1
+        out_dir = Path(self.e_out.text().strip() or str(config.export_dir())) / \
+            ft.safe_filename(self.project.title or Path(self.project.source).stem or "RumbleCut", 60)
+        out = out_dir / f"{editor.clip_filename(c, i)}.mp4"
+        w = Worker(editor.export_clip, self.project, c, out, self.e_thumbs.isChecked())
+        if row:
+            row["button"].setEnabled(False)
+            row["status"].show()
+            row["status"].setText("Exporting…")
+            w.progress.connect(lambda f, m, st=row["status"]: st.setText(f"Exporting… {f * 100:.0f}%"))
+
+        def done(path):
+            if row:
+                row["status"].setText(f"✓ Saved {Path(path).name}")
+            self._add_exported([path])
+
+        def failed(msg):
+            if row:
+                row["status"].setText("⚠ " + msg[:120])
+            QMessageBox.warning(self, "Export failed", msg)
+        w.done.connect(done)
+        w.failed.connect(failed)
+        if row:
+            w.finished.connect(lambda b=row["button"]: b.setEnabled(True))
+        self._start(w)
+
+    def _add_exported(self, files):
+        for f in files:
+            if any(self.ex_files.item(k).data(Qt.UserRole) == f for k in range(self.ex_files.count())):
+                continue
+            it = QListWidgetItem(Path(f).name)
+            it.setData(Qt.UserRole, f)
+            self.ex_files.insertItem(0, it)
+        if files:
+            self._last_out = str(Path(files[0]).parent)
 
     def _collect_export_settings(self):
         e = self.project.export
@@ -2615,13 +2885,7 @@ class MainWindow(QMainWindow):
         w.progress.connect(lambda f, m: (self.ex_progress.setValue(int(f * 1000)), self.ex_status.setText(m)))
 
         def done(files):
-            self.ex_files.clear()
-            for f in files:
-                it = QListWidgetItem(Path(f).name)
-                it.setData(Qt.UserRole, f)
-                self.ex_files.addItem(it)
-            if files:
-                self._last_out = str(Path(files[0]).parent)
+            self._add_exported(files)
             self.ex_status.setText(f"Done - {len(files)} video(s) saved. Double-click one to play it.")
         w.done.connect(done)
         w.failed.connect(lambda m: QMessageBox.warning(self, "Export failed", m))

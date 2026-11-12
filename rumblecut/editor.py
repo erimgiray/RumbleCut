@@ -140,6 +140,11 @@ class Clip:
     cuts: list = field(default_factory=list)        # [[start, end], ...] removed, in file time
     cut_suggestions: list = field(default_factory=list)   # [{start, end, kind, text}]
     jump_cut: str = "punch"                         # "punch" = zoom in on every other piece, "hard" = plain
+    orig: list = field(default_factory=list)        # [start, end] as first found - for ↺ Reset
+    export_opts: dict = field(default_factory=dict) # this clip's own export choices: aspect, quality, name
+
+    EFFECT_FIELDS = ("fade_in", "fade_out", "speed", "zoom", "color", "vignette", "caption", "caption_pos",
+                     "normalize_audio", "transition", "jump_cut")
 
     @property
     def length(self) -> float:
@@ -569,6 +574,46 @@ def render_compilation(clips: list[Clip], settings: ExportSettings, out: str | P
 
 
 # ----------------------------------------------------------------------------- batch export
+def clip_settings(project: Project, clip: Clip) -> ExportSettings:
+    """The project's export settings with this clip's own choices on top."""
+    from dataclasses import replace as _replace
+    o = clip.export_opts or {}
+    s = _replace(project.export)
+    if o.get("aspect") in ASPECTS:
+        s.aspect = o["aspect"]
+    if o.get("quality") in ("high", "balanced", "small"):
+        s.quality = o["quality"]
+    if o.get("height"):
+        s.height = int(o["height"])
+    return s
+
+
+def clip_filename(clip: Clip, index: int) -> str:
+    name = (clip.export_opts or {}).get("name") or clip.title or f"Highlight {index}"
+    return f"{index:02d} - {ft.safe_filename(name.replace(':', '.'))}"
+
+
+def export_clip(project: Project, clip: Clip, out: str | Path, thumbnail: bool = True,
+                on_progress: Callable[[float, str], None] | None = None,
+                cancel: Callable[[], bool] | None = None) -> str:
+    """Export one clip on its own, with its own options."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    render_clip(clip, clip_settings(project, clip), out, cancel=cancel,
+                on_progress=(lambda f: on_progress(f, f"Saving “{clip.title}”…")) if on_progress else None)
+    if thumbnail:
+        try:
+            ft.extract_frame(str(out), min(clip.out_length * 0.4, clip.out_length - 0.1),
+                             str(out.with_suffix(".jpg")), width=1280)
+        except Exception:
+            pass
+    from .context_images import credits_text
+    txt = credits_text([(out.stem, clip)])
+    if txt:
+        out.with_name(out.stem + " - picture credits.txt").write_text(txt, encoding="utf-8")
+    return str(out)
+
+
 def export_project(project: Project, out_dir: str | Path,
                    on_progress: Callable[[float, str], None] | None = None,
                    cancel: Callable[[], bool] | None = None) -> list[str]:
@@ -592,9 +637,9 @@ def export_project(project: Project, out_dir: str | Path,
         for i, c in enumerate(clips, 1):
             if cancel and cancel():
                 raise Cancelled()
-            name = f"{i:02d} - {ft.safe_filename((c.title or f'Highlight {i}').replace(':', '.'))}"
+            name = clip_filename(c, i)
             out = out_dir / f"{name}.mp4"
-            render_clip(c, s, out, cancel=cancel,
+            render_clip(c, clip_settings(project, c), out, cancel=cancel,
                         on_progress=lambda fr, i=i: prog(fr, f"Exporting clip {i}/{len(clips)}"))
             written.append(str(out))
             if s.thumbnails:

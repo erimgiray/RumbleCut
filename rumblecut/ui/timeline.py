@@ -47,6 +47,7 @@ class Timeline(QWidget):
         self.user: list = []                # origin of each clip: "ai" | "user" | "manual"
         self.limits: list[tuple[float, float]] = []      # how far each clip may go (its source file)
         self._clip_drag = None              # (index, what, grab offset, press x, moved?)
+        self.playing = -1                   # the moment the playhead is in while playing
         self.sections: list[tuple[float, float, float, str]] = []   # AI summary: start, end, interest, text
         self._dragging = False
         self.view = (0.0, 0.0)              # visible stretch (start, end); (0, duration) = zoomed out
@@ -113,6 +114,11 @@ class Timeline(QWidget):
             self.user = user
         self.update()
 
+    def set_playing(self, i: int):
+        if i != self.playing:
+            self.playing = i
+            self.update()
+
     def set_sections(self, sections):
         self.sections = list(sections)
         self.update()
@@ -171,22 +177,29 @@ class Timeline(QWidget):
             c.setAlpha(int(60 + 160 * max(0.0, min(1.0, inter))))
             p.fillRect(QRectF(x0 + 0.5, bottom - 4, max(1.5, x1 - x0 - 1), 4), c)
         # highlight regions - the selected one is drawn last, on top of the others
-        order = [i for i in range(len(self.clips)) if i != self.selected]
+        order = [i for i in range(len(self.clips)) if i not in (self.selected, self.playing)]
         if 0 <= self.selected < len(self.clips):
             order.append(self.selected)
+        if 0 <= self.playing < len(self.clips) and self.playing != self.selected:
+            order.append(self.playing)
         for i in order:
             s, e = self.clips[i]
             x0, x1 = self._x(s), self._x(e)
             sel = i == self.selected
+            now = i == self.playing
             origin = self.user[i] if i < len(self.user) else "ai"
             origin = "user" if origin is True else ("ai" if origin is False else origin)
             base_col = _origin_colour(origin)
             col = QColor(base_col)
-            col.setAlpha(120 if sel else 50)
+            col.setAlpha(170 if now else (120 if sel else 50))
+            if now:                                  # playing: a soft glow around it
+                glow = QColor(base_col)
+                glow.setAlpha(60)
+                p.fillRect(QRectF(x0 - 4, top - 4, max(2, x1 - x0) + 8, h + 8), glow)
             p.fillRect(QRectF(x0, top, max(2, x1 - x0), h), col)
             edge = QColor(base_col)
             edge.setAlpha(255 if sel else 160)
-            pen = QPen(edge, 2 if sel else 1)
+            pen = QPen(QColor("#ffffff") if now else edge, 3 if now else (2 if sel else 1))
             if origin == "manual":
                 pen.setStyle(Qt.DashLine)
             p.setPen(pen)
@@ -198,7 +211,7 @@ class Timeline(QWidget):
                     p.drawRoundedRect(QRectF(gx - 2.5, top + h / 2 - 9, 5, 18), 2, 2)
                 p.setBrush(Qt.NoBrush)
             p.setPen(QColor("#e5e7eb"))
-            mark = {"user": "★", "manual": "✎"}.get(origin, "")
+            mark = ("▶ " if now else "") + {"user": "★", "manual": "✎"}.get(origin, "")
             p.drawText(QRectF(x0 - 10, 1, max(20, x1 - x0 + 20), 16), Qt.AlignCenter, f"{mark}{i + 1}")
         # score curve (just the visible stretch)
         sc = self.score
@@ -427,6 +440,7 @@ class ClipTimeline(QWidget):
     span_changed = Signal(float, float, str)     # start, end, what moved ("start" | "end" | "move") - live
     span_committed = Signal(float, float, str)   # on release
     seek = Signal(float)
+    menu_requested = Signal(float, object)       # right-click: time, global position
 
     HANDLE = 7
 
@@ -443,6 +457,7 @@ class ClipTimeline(QWidget):
         self.user = False
         self.end_fn = None         # stream time for an end point (defaults to time_fn)
         self.cuts: list[tuple[float, float]] = []   # ✂ script cuts inside the moment (hatched)
+        self.playing = False
         self._drag = None          # ("start" | "end" | "move", grab offset)
 
     # -- data
@@ -465,6 +480,11 @@ class ClipTimeline(QWidget):
     def set_playhead(self, t):
         self.playhead = float(t)
         self.update()
+
+    def set_playing(self, on: bool):
+        if on != self.playing:
+            self.playing = on
+            self.update()
 
     # -- geometry
     def _x(self, t):
@@ -520,9 +540,9 @@ class ClipTimeline(QWidget):
         col = _origin_colour(self.user) if isinstance(self.user, str) else (USER if self.user else ACCENT)
         xs, xe = self._x(self.start), self._x(self.end)
         fill = QColor(col)
-        fill.setAlpha(70)
+        fill.setAlpha(150 if self.playing else 70)
         p.fillRect(QRectF(xs, top, xe - xs, h), fill)
-        p.setPen(QPen(col, 1))
+        p.setPen(QPen(QColor("#ffffff") if self.playing else col, 2 if self.playing else 1))
         p.drawLine(QPointF(xs, top), QPointF(xe, top))
         p.drawLine(QPointF(xs, bottom), QPointF(xe, bottom))
         # script cuts: hatched, so you can see what's been taken out
@@ -556,8 +576,11 @@ class ClipTimeline(QWidget):
         p.setPen(QColor("#9ca3af"))
         span = self.end - self.start
         removed = sum(max(0.0, min(b, self.end) - max(a, self.start)) for a, b in self.cuts)
-        p.drawText(QRectF(xs, 2, max(1, xe - xs), 16), Qt.AlignCenter,
-                   f"{span:.1f} s → {span - removed:.1f} s after cuts" if removed > 0.05 else f"{span:.1f} s")
+        lab = f"{span:.1f} s → {span - removed:.1f} s after cuts" if removed > 0.05 else f"{span:.1f} s"
+        if self.playing:
+            p.setPen(QColor("#ffffff"))
+            lab = "▶ playing  ·  " + lab
+        p.drawText(QRectF(xs - 60, 2, max(1, xe - xs) + 120, 16), Qt.AlignCenter, lab)
         # playhead
         if a <= self.playhead <= b:
             x = self._x(self.playhead)
@@ -566,6 +589,9 @@ class ClipTimeline(QWidget):
 
     # -- mouse
     def mousePressEvent(self, ev):
+        if ev.button() == Qt.RightButton:
+            self.menu_requested.emit(self._t(ev.position().x()), ev.globalPosition().toPoint())
+            return
         if ev.button() != Qt.LeftButton:
             return
         x = ev.position().x()
@@ -574,6 +600,9 @@ class ClipTimeline(QWidget):
             self._drag = (hit, self._t(x) - self.start)
         else:
             self.seek.emit(max(self.limits[0], min(self.limits[1], self._t(x))))
+
+    def contextMenuEvent(self, ev):
+        ev.accept()
 
     def mouseMoveEvent(self, ev):
         x = ev.position().x()
