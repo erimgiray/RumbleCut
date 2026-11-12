@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
+from .flow import FlowLayout
 from .. import ai, config, context_images as ci, editor, transcribe
 from .. import ffmpeg_tools as ft
 from .timeline import fmt_time
@@ -114,7 +115,7 @@ class ContextImagesTab(QWidget):
         v.setSpacing(8)
 
         # ---- moment + find
-        top = QHBoxLayout()
+        top = FlowLayout()
         top.addWidget(QLabel("Moment"))
         self.moment = QComboBox()
         self.moment.setMinimumWidth(320)
@@ -131,7 +132,7 @@ class ContextImagesTab(QWidget):
         v.addLayout(top)
 
         # ---- sources
-        srow = QHBoxLayout()
+        srow = FlowLayout()
         srow.addWidget(QLabel("Look in"))
         self.src_boxes: dict[str, QCheckBox] = {}
         chosen = set(s.get("ctx_sources") or ["wikimedia"])
@@ -155,7 +156,7 @@ class ContextImagesTab(QWidget):
         v.addLayout(srow)
 
         # ---- progress
-        prow = QHBoxLayout()
+        prow = FlowLayout()
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setFixedHeight(18)
@@ -175,7 +176,7 @@ class ContextImagesTab(QWidget):
         v.addLayout(prow)
 
         # ---- suggestions | preview + controls
-        split = QSplitter(Qt.Horizontal)
+        split = QSplitter(Qt.Vertical)          # list above the preview: fits beside the player
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -185,7 +186,7 @@ class ContextImagesTab(QWidget):
         self.sugg.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sugg.currentRowChanged.connect(self._sugg_selected)
         lv.addWidget(self.sugg, 1)
-        brow = QHBoxLayout()
+        brow = FlowLayout()
         self.btn_approve_all = QPushButton("✓ Approve all")
         self.btn_approve_all.setToolTip("Approve every picture suggested for this moment")
         self.btn_approve_all.clicked.connect(self.approve_all)
@@ -247,7 +248,7 @@ class ContextImagesTab(QWidget):
         ctl.addWidget(QLabel("Size"), 3, 0); ctl.addWidget(self.e_scale, 3, 1)
         rv.addLayout(ctl)
 
-        srch = QHBoxLayout()
+        srch = FlowLayout()
         self.e_query = QLineEdit()
         self.e_query.setPlaceholderText("Search again with your own words, e.g. “Vivek Ramaswamy rally”")
         self.e_query.returnPressed.connect(self.search_again)
@@ -264,7 +265,7 @@ class ContextImagesTab(QWidget):
         self.credit.setOpenExternalLinks(True)
         rv.addWidget(self.credit)
 
-        arow = QHBoxLayout()
+        arow = FlowLayout()
         self.btn_approve = QPushButton("✓ Approve")
         self.btn_approve.setObjectName("primary")
         self.btn_approve.clicked.connect(self.approve)

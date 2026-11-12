@@ -493,18 +493,16 @@ class MainWindow(QMainWindow):
         self.export_index = self.tabs.addTab(_ow, _num_icon(3), "Export && publish")
         self.pub_index = self.export_index
         self.tabs.setIconSize(QSize(26, 26))
-        self.ctx_index = self.tabs.addTab(self._build_context_tab(), _glyph_icon("🎬"), "Edit clips")
+        self.ctx_index = 1                        # Script and Pictures now live in the Clip studio
         _sc = QScrollArea()
         self._settings_scroll = _sc
         _sc.setWidgetResizable(True)
         _sc.setWidget(self._build_settings_tab())
         self.settings_index = self.tabs.addTab(_sc, _glyph_icon("⚙"), "Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
-        self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and (
-            self.script_tab if self.edit_tabs.currentIndex() == 0 else self.ctx_tab).refresh())
-        # leaving a page stops what it was playing, so two players never talk over each other
-        self.tabs.currentChanged.connect(lambda i: self.script_tab.pause() if i != self.ctx_index
-                                         else self.pause_studio())
+        self.tabs.currentChanged.connect(lambda i: i == 1 and self._side_tab_changed(self.side_tabs.currentIndex()))
+        # leaving the Clip studio stops what it was playing
+        self.tabs.currentChanged.connect(lambda i: i != 1 and self.pause_studio())
         self.tabs.currentChanged.connect(lambda i: i == self.export_index and (
             self.pub_tab.refresh() if self.out_tabs.currentIndex() == 1 else self._fill_export_rows()))
         self._build_menu()
@@ -1385,7 +1383,19 @@ class MainWindow(QMainWindow):
         split.addWidget(mid)
 
         # right: inspector
-        split.addWidget(self._build_inspector())
+        from .context_tab import ContextImagesTab
+        from .script_tab import ScriptPanel
+        self.side_tabs = QTabWidget()
+        self.side_tabs.setObjectName("lefttabs")
+        self.side_tabs.addTab(self._build_inspector(), "🎛  Clip")
+        self.script_tab = ScriptPanel(self, embedded=True)
+        self.side_tabs.addTab(self.script_tab, "✂  Script")
+        self.ctx_tab = ContextImagesTab(self)
+        self.side_tabs.addTab(self.ctx_tab, "🖼  Pictures")
+        self.side_tabs.currentChanged.connect(self._side_tab_changed)
+        self.edit_tabs = self.side_tabs           # (older name)
+        self.studio_split = split
+        split.addWidget(self.side_tabs)
         split.setChildrenCollapsible(False)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
@@ -1851,6 +1861,11 @@ class MainWindow(QMainWindow):
 
     def select_clip(self, row: int):
         c = self.current_clip()
+        if hasattr(self, "side_tabs") and self.tabs.currentIndex() == 1:
+            if self.side_tabs.currentIndex() == 1 and getattr(self.script_tab, "_shown_clip", None) is not c:
+                QTimer.singleShot(0, self.script_tab.refresh)
+            elif self.side_tabs.currentIndex() == 2 and c is not None:
+                QTimer.singleShot(0, lambda c=c: self.ctx_tab.select_clip(c))
         self.inspector.setEnabled(c is not None)
         self._sync_timeline(row)
         self._show_clip_timeline(c)
@@ -2274,7 +2289,7 @@ class MainWindow(QMainWindow):
 
     def _script_panel_active(self) -> bool:
         st = getattr(self, "script_tab", None)
-        return bool(st is not None and st.isVisible() and self.tabs.currentIndex() == self.ctx_index)
+        return bool(st is not None and self._script_live())
 
     def undo(self):
         st = getattr(self, "script_tab", None)
@@ -2663,6 +2678,8 @@ class MainWindow(QMainWindow):
 
     def _show_pos(self, t: float):
         """t = position on the project timeline."""
+        if self._script_live():
+            self.script_tab.follow(t)
         total = self.project.to_stream(self.info.duration) if (self.info and self.project.source) else 0
         self.pos_label.setText(fmt_time(self.project.to_stream(t)) + (f" / {fmt_time(total)}" if total else ""))
         self.timeline.set_playhead(t)
@@ -2713,8 +2730,8 @@ class MainWindow(QMainWindow):
     def _studio_state(self, state):
         playing = state == QMediaPlayer.PlayingState
         self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause if playing else QStyle.SP_MediaPlay))
-        if playing and hasattr(self, "script_tab"):
-            self.script_tab.pause()             # only one player at a time
+        if hasattr(self, "script_tab"):
+            self.script_tab.btn_play.setText("■ Stop" if playing else "▶ Play the edit")
 
     def show_publish(self):
         """Go to Export & publish → Post online."""
@@ -2755,6 +2772,9 @@ class MainWindow(QMainWindow):
 
     def toggle_play(self):
         if not self.player:
+            return
+        if self._script_live() and self.player.playbackState() != QMediaPlayer.PlayingState:
+            self.script_tab.play_toggle()        # Space beside the script plays the edit (skipping cuts)
             return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
@@ -3286,7 +3306,38 @@ class MainWindow(QMainWindow):
         span = b - a
         self.timeline.set_view(v / 1000, v / 1000 + span)
 
-    def _build_context_tab(self) -> QWidget:
+    def _side_tab_changed(self, i: int):
+        """🎛 Clip / ✂ Script / 🖼 Pictures beside the player. Script and Pictures get more room."""
+        sp = self.studio_split
+        sizes = sp.sizes()
+        total = sum(sizes) or 1
+        if i in (1, 2):
+            if sizes[2] < total * 0.4:
+                self._narrow_sizes = sizes
+                left = min(sizes[0], 300)
+                sp.setSizes([left, int((total - left) * 0.42), total - left - int((total - left) * 0.42)])
+        elif getattr(self, "_narrow_sizes", None):
+            sp.setSizes(self._narrow_sizes)
+            self._narrow_sizes = None
+        if self.tabs.currentIndex() != 1:
+            return
+        if i == 1:
+            self.script_tab.refresh()
+        elif i == 2:
+            self.ctx_tab.refresh()
+            c = self.current_clip()
+            if c is not None:
+                self.ctx_tab.select_clip(c)
+
+    def show_script(self):
+        self.tabs.setCurrentIndex(1)
+        self.side_tabs.setCurrentIndex(1)
+
+    def _script_live(self) -> bool:
+        return (hasattr(self, "side_tabs") and self.tabs.currentIndex() == 1
+                and self.side_tabs.currentIndex() == 1)
+
+    def _unused_build_context_tab(self) -> QWidget:
         """🎬 Edit clips: ✂ Script (cut words out by editing the text) and 🖼 Pictures."""
         from .context_tab import ContextImagesTab
         from .script_tab import ScriptPanel
@@ -3320,12 +3371,7 @@ class MainWindow(QMainWindow):
         c = self.current_clip()
         if not c:
             return
-        self.tabs.setCurrentIndex(self.ctx_index)
-        self.edit_tabs.setCurrentIndex(0)
-        self.script_tab.refresh()
-        self.script_tab.select_clip(c)
-        if not c.words:
-            self.script_tab.load_script()
+        self.show_script()
 
     def _ai_log_line(self, line: str):
         self._log(line)
@@ -3340,8 +3386,8 @@ class MainWindow(QMainWindow):
         c = self.current_clip()
         if not c:
             return
-        self.tabs.setCurrentIndex(self.ctx_index)
-        self.edit_tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(1)
+        self.side_tabs.setCurrentIndex(2)
         self.ctx_tab.select_clip(c)
         if not any(o.status == "pending" for o in c.overlays):
             self.ctx_tab.find(all_ticked=False)

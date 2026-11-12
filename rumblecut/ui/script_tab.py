@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import ai, editor, script_edit as se, transcribe
+from .flow import FlowLayout
 from .timeline import ClipTimeline, Timeline, _origin_colour, fmt_time
 from .workers import Worker
 
@@ -112,9 +113,12 @@ class ScriptView(QTextEdit):
 
 
 class ScriptPanel(QWidget):
-    def __init__(self, win):
+    def __init__(self, win, embedded: bool = False):
         super().__init__()
         self.win = win
+        # embedded = shown beside the Clip studio's player: it follows the studio's selected moment and
+        # plays through the studio's player (no second player, timelines or look panel of its own)
+        self.embedded = embedded
         self._worker: Worker | None = None
         self._quiet: dict = {}             # id(clip) -> se.Quiet
         self._undo: list = []
@@ -137,7 +141,8 @@ class ScriptPanel(QWidget):
         v.setSpacing(8)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Moment"))
+        self._moment_lbl = QLabel("Moment")
+        top.addWidget(self._moment_lbl)
         self.moment = QComboBox()
         self.moment.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.moment.currentIndexChanged.connect(lambda _: self._moment_changed())
@@ -172,7 +177,7 @@ class ScriptPanel(QWidget):
         self.clip_tl.other_menu.connect(lambda i, t, g: self._menu(i, g, t))
         v.addWidget(self.clip_tl)
 
-        tools = QHBoxLayout()
+        tools = FlowLayout()
         self.btn_clean = QPushButton("🧹 Quick clean-up")
         self.btn_clean.setToolTip("Suggest cutting “um”/“uh”, stutters and repeats, long pauses, and bits "
                                   "the script missed (usually fillers). You approve them.")
@@ -228,7 +233,7 @@ class ScriptPanel(QWidget):
         self.view.time_clicked.connect(self._play_free)
         self.view.menu_requested.connect(self._word_menu)
         lv.addWidget(self.view, 1)
-        brow = QHBoxLayout()
+        brow = FlowLayout()
         self.btn_from = QPushButton("⟦ Start here")
         self.btn_from.setToolTip("Start the moment at the word you clicked (or the first selected word)")
         self.btn_from.clicked.connect(lambda: self._edge_from_cursor("start"))
@@ -244,7 +249,7 @@ class ScriptPanel(QWidget):
             brow.addWidget(b)
         brow.addStretch()
         lv.addLayout(brow)
-        erow = QHBoxLayout()
+        erow = FlowLayout()
         self.btn_cut = QPushButton("✂ Cut selected  (Del)")
         self.btn_cut.clicked.connect(self.cut_selected)
         self.btn_restore = QPushButton("↩ Restore selected  (Enter)")
@@ -281,7 +286,7 @@ class ScriptPanel(QWidget):
         self.note.setAlignment(Qt.AlignCenter)
         self.note.setWordWrap(True)
         self.note.setObjectName("novideo")
-        if HAVE_MM:
+        if HAVE_MM and not embedded:
             self.video = QVideoWidget()
             self.player = QMediaPlayer(self)
             if not os.environ.get("RUMBLECUT_NO_AUDIO"):
@@ -314,11 +319,26 @@ class ScriptPanel(QWidget):
         self.lengths.setWordWrap(True)
         rv.addWidget(self.lengths)
         rv.addWidget(self._build_props())
-        split.addWidget(right)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([720, 480])
-        v.addWidget(split, 1)
+        if embedded:
+            # play button and lengths sit under the text; the studio's player, timelines and look panel are used
+            prow2 = QHBoxLayout()
+            prow2.addWidget(self.btn_play)
+            prow2.addWidget(self.pos_label, 1)
+            lv.insertLayout(lv.count() - 1, prow2)
+            lv.insertWidget(lv.count() - 1, self.lengths)
+            for wdg in (self._moment_lbl, self.moment, self.overview, self.clip_tl_title, self.clip_tl,
+                        self.btn_fx, self.props):
+                wdg.hide()
+            right.setParent(self)                   # kept (hidden) so its controls stay alive
+            right.hide()
+            self._right = right
+            v.addWidget(left, 1)
+        else:
+            split.addWidget(right)
+            split.setStretchFactor(0, 3)
+            split.setStretchFactor(1, 2)
+            split.setSizes([720, 480])
+            v.addWidget(split, 1)
 
         # Ctrl+Z / Ctrl+Shift+Z come from the main window, which hands them to this panel while it's open
         self._moment_changed()
@@ -329,6 +349,8 @@ class ScriptPanel(QWidget):
         return self.win.project
 
     def current_clip(self):
+        if self.embedded:
+            return self.win.current_clip()
         cid = self.moment.currentData()
         return next((c for c in self.project.clips if id(c) == cid), None)
 
@@ -359,12 +381,21 @@ class ScriptPanel(QWidget):
                 self.moment.setItemText(k, self._label(i, c))
 
     def select_clip(self, c):
+        if self.embedded:
+            if c in self.project.clips:
+                r = self.project.clips.index(c)
+                if self.win.clip_list.currentRow() != r:
+                    self.win.clip_list.setCurrentRow(r)
+                else:
+                    self._moment_changed()
+            return
         i = self.moment.findData(id(c))
         if i >= 0:
             self.moment.setCurrentIndex(i)
 
     def _moment_changed(self):
         c = self.current_clip()
+        self._shown_clip = c
         self._undo.clear()
         self._redo.clear()
         self._stop()
@@ -886,16 +917,22 @@ class ScriptPanel(QWidget):
             return
         if (self._worker is not None and self._worker.isRunning()) or getattr(self, "_auto_stopped", False):
             return
+        if not self.isVisible():                     # only once you're actually looking at the script
+            return
         info = getattr(self.win, "info", None)
         if not (self.project.source and info and info.duration and transcribe.available()):
             return
         if self._written_fraction() < 0.995:
-            QTimer.singleShot(0, lambda: self.load_script(auto=True))
+            if not getattr(self, "_auto_pending", False):
+                self._auto_pending = True
+                QTimer.singleShot(0, lambda: (setattr(self, "_auto_pending", False), self.load_script(auto=True)))
 
     def load_script(self, auto: bool = False):
         """📝 Write out the whole stream - the moments first, then everything before and after them.
         Stretches arrive as they're done; it can be stopped and carried on later."""
         if self._worker is not None and self._worker.isRunning():
+            if auto:
+                return                               # already writing (or busy) - never stop it by itself
             if getattr(self, "_writing", False):
                 self._worker.cancel()
                 self._auto_stopped = True
@@ -1250,7 +1287,19 @@ class ScriptPanel(QWidget):
 
     # ------------------------------------------------------------------ live preview that skips cuts
     def _playing(self) -> bool:
+        if self.embedded:
+            wp = self.win.player
+            return bool(wp) and wp.playbackState() == QMediaPlayer.PlayingState
         return bool(self.player) and self.player.playbackState() == QMediaPlayer.PlayingState
+
+    def follow(self, tp: float):
+        """The studio's playhead moved (stream time): mark the word there."""
+        c = self.current_clip()
+        if c is not None and self._stop_at is None and c.start + c.offset <= tp <= c.end + c.offset:
+            self.pos_label.setText(f"{fmt_time(c.to_out(tp - c.offset))} / {fmt_time(c.out_length)}")
+        else:
+            self.pos_label.setText(fmt_time(self.project.to_stream(tp)))
+        self._highlight_time(tp)
 
     def _state_changed(self, state):
         playing = state == QMediaPlayer.PlayingState
@@ -1263,10 +1312,24 @@ class ScriptPanel(QWidget):
 
     def pause(self):
         """Stop playing (keeps the position) - e.g. when the Clip studio starts playing."""
+        if self.embedded:
+            return
         if self._playing():
             self._stop()
 
     def play_toggle(self):
+        if self.embedded:
+            c, win = self.current_clip(), self.win
+            if not (c and win.player):
+                return
+            if self._playing():
+                win.pause_studio()
+                return
+            t = win._player_pos()                          # file time in what the studio has loaded
+            here = win._media_offset is not None and abs(win._media_offset - c.offset) < 0.01 and \
+                c.start <= t < c.end - 0.3
+            self._play_from(t if here else c.kept[0][0])
+            return
         if not self.player:
             return
         if self._playing():
@@ -1283,6 +1346,16 @@ class ScriptPanel(QWidget):
 
     def _play_from(self, t: float):
         c = self.current_clip()
+        if self.embedded:
+            if not (c and self.win.player):
+                return
+            for a, b in c.cuts:
+                if a <= t < b:
+                    t = b
+            self.win.seek_clip(c, t)
+            self.win._clip_stop_at = c.end               # the studio skips the cuts and stops at the end
+            self.win.player.play()
+            return
         if not (self.player and c):
             return
         self._restore_source()
@@ -1298,6 +1371,8 @@ class ScriptPanel(QWidget):
         self.btn_play.setText("■ Stop")
 
     def _stop(self):
+        if self.embedded and self._playing():
+            self.win.pause_studio()
         if self.player:
             self.player.pause()
         self._stop_at = None
@@ -1313,6 +1388,14 @@ class ScriptPanel(QWidget):
 
     def _play_free(self, t: float):
         """Play the stream from a word outside the moment (project time)."""
+        if self.embedded:
+            c = self.current_clip()
+            if c is not None and c.start + c.offset <= t < c.end + c.offset - 0.1:
+                self._play_from(t - c.offset)
+            elif self.win.player:
+                self.win.scrub_to(t)
+                self.win.player.play()
+            return
         if not self.player or not self.project.source:
             return
         c = self.current_clip()
@@ -1389,6 +1472,8 @@ class ScriptPanel(QWidget):
 
     # ------------------------------------------------------------------ where the moment is
     def _sync_views(self, keep_view: bool = False):
+        if self.embedded:
+            return                                  # the Clip studio's own timelines show it
         win, c = self.win, self.current_clip()
         tl, ov = win.timeline, self.overview
         have = bool(tl.duration) and bool(self.project.source)
@@ -1477,6 +1562,10 @@ class ScriptPanel(QWidget):
         self.seek_stream(t)
 
     def seek_stream(self, t: float):
+        if self.embedded:
+            self.win.scrub_to(t)
+            self._highlight_time(t)
+            return
         c = self.current_clip()
         if not self.player or not self.project.source:
             return
