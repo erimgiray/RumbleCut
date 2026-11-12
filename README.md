@@ -32,7 +32,7 @@ Options:
 ## Using it
 
 **① Get video:** paste a `rumble.com/...` link, pick a quality, and click **Download**. Large streams resume if interrupted. You can also open any video already on your PC.
-- **Only download part of the video:** tick the box and fill in **Starts from** and **Ends at** (e.g. `1:05:00` and `1:20:00`). Press **⏭ To the end** to run that part to the end of the video, and **＋ Add another part** for more parts.
+- **Only download part of the video:** tick the box and fill in **Starts from** and **Ends at** (e.g. `1:05:00` and `1:20:00`). Starts from shows 0:00 and Ends at shows — until you type a time. Press **⏭ To the end** to run that part to the end of the video, and **＋ Add part** (next to it) for more parts.
   - Times can be `h:mm:ss`, `mm:ss`, plain seconds, or `1h5m`.
   - Overlapping ranges are merged.
   - Each range is saved as its own file, and only those bytes are fetched.

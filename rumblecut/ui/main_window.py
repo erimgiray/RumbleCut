@@ -229,6 +229,8 @@ class RangesEditor(QWidget):
     """Parts of the video to download: one row per part, each with “Starts from” and “Ends at”.
     “To the end” makes a part run to the end of the video. Reads/writes the same text as before
     ("1:05:00-1:20:00, 2:10:30-"), so saved settings and the downloader are unchanged."""
+    START_HINT = "0:00"      # an empty start is the very beginning
+    EMPTY = "—"              # an empty end shows a dash until you type a time
     textChanged = Signal(str)
     returnPressed = Signal()
     editingFinished = Signal()
@@ -243,13 +245,6 @@ class RangesEditor(QWidget):
         self._rows_box = QVBoxLayout()
         self._rows_box.setSpacing(4)
         self._v.addLayout(self._rows_box)
-        self.btn_add = QPushButton("＋ Add another part")
-        self.btn_add.setObjectName("more")
-        self.btn_add.clicked.connect(lambda: (self._add_row(), self._rows[-1]["start"].setFocus()))
-        add_row = QHBoxLayout()
-        add_row.addWidget(self.btn_add)
-        add_row.addStretch()
-        self._v.addLayout(add_row)
         self._add_row()
 
     # -- rows
@@ -257,17 +252,22 @@ class RangesEditor(QWidget):
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        st = QLineEdit(start); st.setPlaceholderText("h:mm:ss"); st.setMaximumWidth(130)
-        en = QLineEdit(end); en.setPlaceholderText("h:mm:ss"); en.setMaximumWidth(170)
+        st = QLineEdit(start); st.setPlaceholderText(self.START_HINT); st.setMaximumWidth(130)
+        st.setToolTip("Where this part starts (h:mm:ss). Empty = the very beginning (0:00).")
+        en = QLineEdit(end); en.setPlaceholderText(self.EMPTY); en.setMaximumWidth(170)
+        en.setToolTip("Where this part ends (h:mm:ss)")
         te = QPushButton("⏭ To the end")
         te.setCheckable(True)
         te.setToolTip("Download from “Starts from” right to the end of the video")
+        add = QPushButton("＋ Add part")
+        add.setToolTip("Download another part of the video as well")
+        add.clicked.connect(lambda: (self._add_row(), self._rows[-1]["start"].setFocus()))
         rm = QToolButton(); rm.setText("✖"); rm.setToolTip("Remove this part")
         h.addWidget(QLabel("Starts from")); h.addWidget(st)
         h.addSpacing(10)
-        h.addWidget(QLabel("Ends at")); h.addWidget(en); h.addWidget(te); h.addWidget(rm)
+        h.addWidget(QLabel("Ends at")); h.addWidget(en); h.addWidget(te); h.addWidget(add); h.addWidget(rm)
         h.addStretch()
-        row = {"w": w, "start": st, "end": en, "to_end": te, "rm": rm}
+        row = {"w": w, "start": st, "end": en, "to_end": te, "add": add, "rm": rm}
         self._rows.append(row)
         self._rows_box.addWidget(w)
         for le in (st, en):
@@ -287,7 +287,7 @@ class RangesEditor(QWidget):
             en.blockSignals(True); en.clear(); en.blockSignals(False)
             en.setPlaceholderText("end of video" + (f" ({fmt_time(self._duration)})" if self._duration else ""))
         else:
-            en.setPlaceholderText("h:mm:ss")
+            en.setPlaceholderText(self.EMPTY)
             en.setText(row.pop("saved_end", ""))
         en.setEnabled(not on and self.isEnabled())
         self.textChanged.emit(self.text())
@@ -314,6 +314,7 @@ class RangesEditor(QWidget):
     def _update_rm(self):
         for r in self._rows:
             r["rm"].setVisible(len(self._rows) > 1)
+            r["add"].setVisible(r is self._rows[-1])     # “Add part” sits on the last row only
 
     # -- QLineEdit-like API used by the rest of the window
     def text(self) -> str:
