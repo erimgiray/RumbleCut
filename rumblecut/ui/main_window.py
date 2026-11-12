@@ -3179,6 +3179,7 @@ class MainWindow(QMainWindow):
         self.ai_model = QComboBox()
         self.ai_model.setEditable(True)
         self.ai_model.setMinimumWidth(200)
+        self.ai_model.setMaxVisibleItems(24)
         if cfg["local_model"]:
             self.ai_model.addItem(cfg["local_model"], cfg["local_model"])
         self.ai_model.lineEdit().setPlaceholderText("pick or type a model name")
@@ -3205,14 +3206,31 @@ class MainWindow(QMainWindow):
         self.ai_key.setEchoMode(QLineEdit.Password)
         self.ai_key.setPlaceholderText("•••••••• saved (paste a new key to replace)" if ai.get_api_key()
                                        else "sk-ant-…  (from console.anthropic.com)")
-        self.ai_cloud_model = QLineEdit(cfg["cloud_model"])
+        self.ai_cloud_model = QComboBox()
+        self.ai_cloud_model.setEditable(True)
+        self.ai_cloud_model.setMinimumWidth(200)
+        self.ai_cloud_model.setMaxVisibleItems(24)
+        self.ai_cloud_model.lineEdit().setPlaceholderText("pick or type a model id")
+        self._fill_cloud_models([], cfg["cloud_model"])
+        crefresh = QToolButton()
+        crefresh.setText("⟳")
+        crefresh.setToolTip("Load every Claude model your API key can use")
+        crefresh.clicked.connect(lambda: self.refresh_cloud_models(quiet=False))
+        crow = QHBoxLayout()
+        crow.addWidget(self.ai_cloud_model, 1)
+        crow.addWidget(crefresh)
+        self.ai_cloud_status = QLabel("")
+        self.ai_cloud_status.setObjectName("muted")
+        self.ai_cloud_status.setWordWrap(True)
         cf.addRow("API key", self.ai_key)
-        cf.addRow("Model", self.ai_cloud_model)
+        cf.addRow("Model", crow)
+        cf.addRow("", self.ai_cloud_status)
         av.addWidget(self.ai_cloud_box)
         sf = QFormLayout()
         self.s_whisper = QComboBox()
-        for name, size in transcribe.WHISPER_MODELS:          # smallest first
-            self.s_whisper.addItem(f"{name}  ·  {size}", name)
+        for name, size, note in transcribe.WHISPER_MODELS:    # smallest first
+            self.s_whisper.addItem("  ·  ".join(x for x in (name, size, note) if x), name)
+        self.s_whisper.setMaxVisibleItems(len(transcribe.WHISPER_MODELS))
         self.s_whisper.setCurrentIndex(max(0, self.s_whisper.findData(s.get("whisper_model", "small"))))
         self.s_whisper.setToolTip("Bigger = more accurate but slower. The size is a one-time download.")
         self.s_whisper.currentIndexChanged.connect(
@@ -3368,7 +3386,9 @@ class MainWindow(QMainWindow):
         self.ai_url.editingFinished.connect(lambda: (self._save_setting("local_url", self.ai_url.text().strip()),
                                                      self.refresh_local_models(quiet=True)))
         self.ai_model.currentTextChanged.connect(lambda _: (n := self._ai_model_name()) and
+                                                 not n.startswith("pull:") and
                                                  self._save_setting("local_model", n))
+        self.ai_model.activated.connect(self._local_model_picked)
 
         def key_entered():
             k = self.ai_key.text().strip()
@@ -3377,9 +3397,12 @@ class MainWindow(QMainWindow):
                 self.ai_key.clear()
                 self.ai_key.setPlaceholderText("•••••••• saved (paste a new key to replace)")
                 self.statusBar().showMessage("API key saved (encrypted for your Windows account) ✓", 4000)
+                self.refresh_cloud_models(quiet=False)
         self.ai_key.editingFinished.connect(key_entered)
-        self.ai_cloud_model.editingFinished.connect(
-            lambda: self._save_setting("cloud_model", self.ai_cloud_model.text().strip() or ai.DEFAULT_CLOUD_MODEL))
+        self.ai_cloud_model.activated.connect(lambda _: self._save_cloud_model())
+        self.ai_cloud_model.lineEdit().editingFinished.connect(self._save_cloud_model)
+        if ai.get_api_key():
+            QTimer.singleShot(0, lambda: self.refresh_cloud_models(quiet=True))
 
         left.addStretch()
 
@@ -3544,6 +3567,95 @@ class MainWindow(QMainWindow):
             return (self.ai_model.itemData(i) or self.ai_model.itemText(i)).strip()
         return self.ai_model.currentText().strip()      # typed by hand
 
+    # cloud (Claude) models
+    def _cloud_model_name(self) -> str:
+        i = self.ai_cloud_model.currentIndex()
+        if i >= 0 and self.ai_cloud_model.itemText(i) == self.ai_cloud_model.currentText():
+            return (self.ai_cloud_model.itemData(i) or self.ai_cloud_model.itemText(i)).strip()
+        return self.ai_cloud_model.currentText().strip()
+
+    def _save_cloud_model(self):
+        self._save_setting("cloud_model", self._cloud_model_name() or ai.DEFAULT_CLOUD_MODEL)
+
+    def _fill_cloud_models(self, models: list[dict], current: str):
+        """models: from the API ({"id", "name"}), or [] for the built-in list."""
+        cb = self.ai_cloud_model
+        cb.blockSignals(True)
+        cb.clear()
+        ids = []
+        for mid, name, note in ai.CLOUD_MODELS:
+            if not models or any(m["id"] == mid for m in models):
+                cb.addItem(ai.cloud_model_label(mid), mid)
+                ids.append(mid)
+        extra = [m for m in models if m["id"] not in ids]
+        if extra:
+            cb.insertSeparator(cb.count())
+            for m in extra:
+                cb.addItem(f"{m['name']}  ·  {m['id']}", m["id"])
+                ids.append(m["id"])
+        i = cb.findData(current)
+        if i >= 0:
+            cb.setCurrentIndex(i)
+        elif current:
+            cb.addItem(current, current)
+            cb.setCurrentIndex(cb.count() - 1)
+        cb.blockSignals(False)
+
+    def refresh_cloud_models(self, quiet: bool = True):
+        if not hasattr(self, "ai_cloud_model"):
+            return
+        if not ai.get_api_key():
+            self.ai_cloud_status.setText("Paste your API key to see every model your account can use.")
+            return
+        self.ai_cloud_status.setText("Loading your models…")
+        w = Worker(lambda on_progress=None, cancel=None: ai.list_cloud_models())
+        w.background = True
+
+        def done(models):
+            self._fill_cloud_models(models, self._cloud_model_name() or ai.settings()["cloud_model"])
+            self.ai_cloud_status.setText(f"<span style='color:{ACCENT}'>✔</span> {len(models)} model(s) "
+                                         "available on your account")
+        w.done.connect(done)
+        w.failed.connect(lambda m: self.ai_cloud_status.setText(
+            m if not quiet else "Showing the usual Claude models (press ⟳ to load your account's list)."))
+        self._start(w)
+
+    # local models
+    def _local_model_picked(self, i: int):
+        data = self.ai_model.itemData(i) or ""
+        if not data.startswith("pull:"):
+            return
+        name = data[5:]
+        size = next((gb for n, gb, _ in ai.POPULAR_LOCAL if n == name), None)
+        self.ai_model.blockSignals(True)
+        k = self.ai_model.findData(ai.settings()["local_model"])
+        if k >= 0:
+            self.ai_model.setCurrentIndex(k)
+        else:
+            self.ai_model.setEditText(ai.settings()["local_model"])
+        self.ai_model.blockSignals(False)
+        if QMessageBox.question(self, "Download model",
+                                f"Download {name} into Ollama"
+                                + (f" (about {size:g} GB)" if size else "") + "?\n\n"
+                                "It's a one-time download; you can keep using RumbleCut meanwhile.") != QMessageBox.Yes:
+            return
+        url = self.ai_url.text().strip()
+        w = Worker(lambda on_progress=None, cancel=None: ai.pull_local_model(name, url, on_progress, cancel))
+        w.background = True
+        w.progress.connect(lambda f, m: self.ai_local_status.setText(
+            m + (f"  ({f * 100:.0f}%)" if f >= 0 else "")))
+
+        def done(n):
+            self._save_setting("local_model", n)
+            self.ai_model.blockSignals(True)
+            self.ai_model.setEditText(n)                 # becomes the chosen model once the list reloads
+            self.ai_model.blockSignals(False)
+            self.refresh_local_models(quiet=False)
+            self.statusBar().showMessage(f"✔ {n} downloaded and chosen", 5000)
+        w.done.connect(done)
+        w.failed.connect(lambda m: self.ai_local_status.setText(f"<span style='color:#f87171'>{m}</span>"))
+        self._start(w)
+
     def refresh_local_models(self, quiet: bool = True):
         if not hasattr(self, "ai_model"):
             return
@@ -3559,6 +3671,13 @@ class MainWindow(QMainWindow):
             self.ai_model.clear()
             for m in models:                                   # already smallest first
                 self.ai_model.addItem(ai.model_label(m), m["name"])
+            installed = {m["name"] for m in models} | {m["name"].removesuffix(":latest") for m in models}
+            more = [x for x in ai.POPULAR_LOCAL if x[0] not in installed] if kind == "ollama" else []
+            if more:
+                if models:
+                    self.ai_model.insertSeparator(self.ai_model.count())
+                for n, gb, note in more:
+                    self.ai_model.addItem(f"⬇  {n}  ·  about {gb:g} GB  ·  {note}  (not installed)", "pull:" + n)
             i = self.ai_model.findData(cur) if cur else -1
             if i >= 0:
                 self.ai_model.setCurrentIndex(i)
@@ -3566,13 +3685,15 @@ class MainWindow(QMainWindow):
                 self.ai_model.setEditText(cur)                 # a name typed by hand
             elif models:
                 self.ai_model.setCurrentIndex(0)
+            else:
+                self.ai_model.setCurrentIndex(-1)
             self.ai_model.blockSignals(False)
-            if self._ai_model_name():
+            if self._ai_model_name() and not self._ai_model_name().startswith("pull:"):
                 self._save_setting("local_model", self._ai_model_name())
             self.ai_local_status.setText(f"<span style='color:{ACCENT}'>✔ Connected</span> · {len(models)} model(s) "
                                          "installed" if models else
-                                         "Connected, but no models are installed yet. "
-                                         "In a terminal run e.g.  ollama pull llama3.1")
+                                         "Connected, but no models are installed yet. Pick one marked ⬇ "
+                                         "in the list to download it.")
         w.done.connect(done)
         w.failed.connect(lambda m: self.ai_local_status.setText(
             m if not quiet else "Not connected. Start Ollama (or your local server), then press ⟳."))
@@ -3855,6 +3976,13 @@ QTabBar::tab {{ padding: 10px 22px; background: #15171b; color: #9ca3af; border:
 QTabBar::tab:selected {{ color: #fff; border-bottom: 3px solid {ACCENT}; background: #1b1d22; }}
 QGroupBox {{ border: 1px solid #2c3038; border-radius: 8px; margin-top: 14px; padding: 10px 8px 8px 8px; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #cbd5e1; font-weight: 600; }}
+QFrame#pubcard {{ background: #171a20; border: 1px solid #2c3038; border-radius: 10px; }}
+QFrame#pubcard QLabel, QFrame#pubcard QCheckBox {{ background: transparent; }}
+QWidget#cardbody {{ background: transparent; }}
+QFrame#cardline {{ background: #2c3038; border: none; }}
+QCheckBox#cardtitle, QLabel#cardtitle {{ font-size: 14px; font-weight: 600; color: #e5e7eb; spacing: 8px; }}
+QFrame#pubbar {{ border-top: 1px solid #2c3038; }}
+QScrollArea#pubscroll, QWidget#pubcontent {{ background: transparent; }}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ background: #121418; border: 1px solid #2f343d;
     border-radius: 6px; padding: 5px 7px 5px 11px; selection-background-color: {ACCENT}; }}
 QComboBox QAbstractItemView {{ background: #1f2228; border: 1px solid #2c3038; selection-background-color: #2d3a22; padding: 4px; }}

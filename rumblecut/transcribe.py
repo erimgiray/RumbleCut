@@ -24,8 +24,19 @@ from .ffmpeg_tools import Cancelled
 Segment = tuple[float, float, str]
 
 # Speech models, smallest first, with their one-time download size.
-WHISPER_MODELS = [("tiny", "75 MB"), ("base", "145 MB"), ("small", "484 MB"),
-                  ("medium", "1.5 GB"), ("large-v3", "3.1 GB")]
+# Every model faster-whisper can download, smallest first: (name, download size, note).
+WHISPER_MODELS = [
+    ("tiny", "75 MB", "fastest, rough"), ("tiny.en", "75 MB", "English only"),
+    ("base", "145 MB", ""), ("base.en", "145 MB", "English only"),
+    ("distil-small.en", "330 MB", "English only, fast"),
+    ("small", "484 MB", "good balance (default)"), ("small.en", "484 MB", "English only"),
+    ("distil-medium.en", "790 MB", "English only, fast"),
+    ("medium", "1.5 GB", ""), ("medium.en", "1.5 GB", "English only"),
+    ("distil-large-v3", "1.5 GB", "near large quality, much faster"),
+    ("distil-large-v3.5", "1.5 GB", "near large quality, much faster"),
+    ("large-v3-turbo", "1.6 GB", "large quality, fast - best with a GPU"),
+    ("large-v2", "3.1 GB", "most accurate, slow"), ("large-v3", "3.1 GB", "most accurate, slow"),
+]
 _model_cache: dict = {}
 
 

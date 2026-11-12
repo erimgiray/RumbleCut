@@ -120,10 +120,10 @@ Projects can be saved and reopened later (`.rcproj`), including the AI's Summary
 ### AI models: local or cloud (Settings → AI models)
 | Mode | What runs where | Setup |
 |---|---|---|
-| **On this PC** (default) | Everything runs locally: private and free, using your GPU | Install [Ollama](https://ollama.com), then run e.g. `ollama pull llama3.1` (or `qwen2.5:14b`), press ⟳ and pick the model. LM Studio, llama.cpp and other OpenAI-compatible servers work too: choose "OpenAI-compatible" and enter the server address. |
-| **Cloud** | Claude via the Anthropic API | Paste an API key from console.anthropic.com. It's stored encrypted for your Windows account. The default model is `claude-haiku-5-5`. |
+| **On this PC** (default) | Everything runs locally: private and free, using your GPU | Install [Ollama](https://ollama.com) and pick a model. The list shows the models you have, then popular ones marked ⬇ (with download size and what they suit); pick one of those and RumbleCut downloads it into Ollama for you. LM Studio, llama.cpp and other OpenAI-compatible servers work too: choose "OpenAI-compatible" and enter the server address. |
+| **Cloud** | Claude via the Anthropic API | Paste an API key from console.anthropic.com. It's stored encrypted for your Windows account. The Model list shows Haiku 5.5 (default), Sonnet 5.5, Opus 5.5 and Fable 5.1, plus every other model your key can use (loaded from your account; ⟳ reloads it). |
 
-Speech-to-text always runs on your PC.
+Speech-to-text always runs on your PC. Every Whisper model is in the list, from `tiny` (75 MB) to `large-v3` (3.1 GB), including the English-only `.en` models and the fast `distil` and `large-v3-turbo` ones.
 - **If you have an NVIDIA GPU:** press **⚡ Install GPU speed-up** (Settings → AI models) for ~10–20× faster transcription.
   - It's a one-time 550 MB download of NVIDIA's free cuBLAS libraries from PyPI, about 800 MB on disk.
   - The app tests the GPU before using it, and falls back to the CPU automatically if it can't run there.

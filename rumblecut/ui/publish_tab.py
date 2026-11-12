@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QRadioButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
@@ -21,47 +21,111 @@ ICONS = {"youtube": "▶", "instagram": "◎", "tiktok": "♪", "x": "𝕏"}
 FORMAT_NAMES = {"vertical": "Vertical 9:16", "original": "Original shape"}
 
 
-class PlatformCard(QGroupBox):
+class _Fade(QWidget):
+    """A soft fade at the bottom of the scrolling area, so content slides under the posting bar
+    instead of being sliced off. Hidden once you've scrolled to the end."""
+
+    def __init__(self, area):
+        super().__init__(area)
+        self.area = area
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        area.verticalScrollBar().valueChanged.connect(lambda _: self.place())
+        area.verticalScrollBar().rangeChanged.connect(lambda *_: self.place())
+
+    def place(self):
+        vp = self.area.viewport()
+        h = 36
+        self.setGeometry(vp.x(), vp.y() + vp.height() - h, vp.width(), h)
+        sb = self.area.verticalScrollBar()
+        self.setVisible(sb.maximum() > 0 and sb.value() < sb.maximum() - 2)
+        self.raise_()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        g = QLinearGradient(0, 0, 0, self.height())
+        g.setColorAt(0, QColor(27, 29, 34, 0))
+        g.setColorAt(1, QColor(27, 29, 34, 245))
+        p.fillRect(self.rect(), g)
+
+
+class _FadeScroll(QScrollArea):
+    def __init__(self):
+        super().__init__()
+        self.fade = _Fade(self)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.fade.place()
+
+
+class PlatformCard(QFrame):
     """One platform: tick to post there, its text fields, format and (YouTube) privacy."""
+
+    NOTES = {"youtube": "Posts straight to your channel (3 min or less, vertical = a Short).",
+             "instagram": "Posts a Reel to your profile.",
+             "tiktok": "Sends a draft to your TikTok inbox.",
+             "x": "Posts with the video attached (about $0.015 per post)."}
 
     def __init__(self, tab, platform: str):
         super().__init__()
         self.tab, self.platform = tab, platform
-        self.setCheckable(True)
-        self.toggled.connect(lambda on: tab._card_changed(self))
+        self.setObjectName("pubcard")
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         v = QVBoxLayout(self)
-        v.setSpacing(6)
+        v.setContentsMargins(14, 12, 14, 14)
+        v.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.check = QCheckBox(f"{ICONS[platform]}  {pb.PLATFORMS[platform]}")
+        self.check.setObjectName("cardtitle")
+        self.check.setToolTip("Tick to post this moment here")
+        self.check.toggled.connect(self._toggled)
+        self.account = QLabel("")
+        self.account.setObjectName("muted")
+        self.btn_connect = QPushButton("Connect…")
+        self.btn_connect.clicked.connect(tab.open_accounts)
+        head.addWidget(self.check)
+        head.addWidget(self.account, 1)
+        head.addWidget(self.btn_connect)
+        v.addLayout(head)
+        line = QFrame()
+        line.setObjectName("cardline")
+        line.setFixedHeight(1)
+        v.addWidget(line)
+        self.body = QWidget()
+        self.body.setObjectName("cardbody")
+        bv = QVBoxLayout(self.body)
+        bv.setContentsMargins(0, 2, 0, 0)
+        bv.setSpacing(8)
         self.status = QLabel("")
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
-        self.btn_connect = QPushButton("Connect…")
-        self.btn_connect.setObjectName("link")
-        self.btn_connect.clicked.connect(tab.open_accounts)
-        srow = QHBoxLayout()
-        srow.addWidget(self.status, 1)
-        srow.addWidget(self.btn_connect)
-        v.addLayout(srow)
+        bv.addWidget(self.status)
         f = QFormLayout()
-        f.setLabelAlignment(Qt.AlignRight)
+        f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f.setHorizontalSpacing(10)
+        f.setVerticalSpacing(8)
+        f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.fields: dict[str, QWidget] = {}
         if platform == "youtube":
             self._line(f, "title", "Title", 100)
-            self._text(f, "description", "Description", 70)
+            self._text(f, "description", "Description", 76)
             self._line(f, "tags", "Tags", 480, "comma separated")
             self.privacy = QComboBox()
             self.privacy.addItems(["public", "unlisted", "private"])
             self.privacy.currentTextChanged.connect(lambda t: tab._field_changed(self.platform, "privacy", t))
             f.addRow("Visibility", self.privacy)
         elif platform == "x":
-            self._text(f, "text", "Post", 60)
+            self._text(f, "text", "Post", 76)
             self.counter = QLabel("")
             self.counter.setObjectName("muted")
             f.addRow("", self.counter)
         else:
-            self._text(f, "caption", "Caption", 70)
+            self._text(f, "caption", "Caption", 76)
             if platform == "tiktok":
-                n = QLabel("Arrives in your TikTok inbox as a draft - RumbleCut copies this caption so you "
-                           "can paste it, then press Post in TikTok.")
+                n = QLabel("Arrives as a draft. RumbleCut copies this caption so you can paste it, "
+                           "then press Post in TikTok.")
                 n.setObjectName("muted")
                 n.setWordWrap(True)
                 f.addRow("", n)
@@ -70,7 +134,27 @@ class PlatformCard(QGroupBox):
             self.fmt.addItem(name, k)
         self.fmt.currentIndexChanged.connect(lambda _: tab._field_changed(self.platform, "format", self.fmt.currentData()))
         f.addRow("Shape", self.fmt)
-        v.addLayout(f)
+        bv.addLayout(f)
+        v.addWidget(self.body)
+        v.addStretch(1)
+        self.body.setEnabled(False)
+
+    # the card behaves like the old checkable box: ticked = post here, unticked = fields greyed out
+    def isChecked(self) -> bool:
+        return self.check.isChecked()
+
+    def setChecked(self, on: bool):
+        self.check.blockSignals(True)
+        self.check.setChecked(on)
+        self.check.blockSignals(False)
+        self.body.setEnabled(on)
+
+    def _toggled(self, on: bool):
+        self.body.setEnabled(on)
+        self.tab._card_changed(self)
+
+    def title(self) -> str:
+        return f"{self.check.text()}  ·  {self.account.text()}"
 
     def _line(self, f, key, label, maxlen, ph=""):
         e = QLineEdit()
@@ -111,16 +195,12 @@ class PlatformCard(QGroupBox):
 
     def refresh_status(self):
         cid, _ = pb.get_credentials(self.platform)
-        name = pb.PLATFORMS[self.platform]
         if pb.is_connected(self.platform):
-            self.setTitle(f"{ICONS[self.platform]}  {name}  ·  {pb.account_name(self.platform)}")
-            self.status.setText({"youtube": "Posts straight to your channel (≤ 3 min vertical = a Short).",
-                                 "instagram": "Posts a Reel to your profile.",
-                                 "tiktok": "Sends a draft to your TikTok inbox.",
-                                 "x": "Posts with the video attached (about $0.015 per post)."}[self.platform])
+            self.account.setText(pb.account_name(self.platform) or "connected")
+            self.status.setText(self.NOTES[self.platform])
             self.btn_connect.hide()
         else:
-            self.setTitle(f"{ICONS[self.platform]}  {name}  ·  not connected")
+            self.account.setText("not connected")
             self.status.setText("Connect your account in Settings → Publishing accounts." if cid else
                                 "Set up once in Settings → Publishing accounts (free).")
             self.btn_connect.show()
@@ -133,81 +213,130 @@ class PublishTab(QWidget):
         self._worker: Worker | None = None
         self._loading = False
         self._texts: dict = {}
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 12, 16, 12)
-        v.setSpacing(8)
+        v = QHBoxLayout(self)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(18)
+
+        # ---- moments
+        left = QVBoxLayout()
+        left.setSpacing(10)
         h = QLabel("🚀  Publish")
         h.setObjectName("h2")
-        v.addWidget(h)
-
-        split = QSplitter(Qt.Horizontal)
-        # ---- moments
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(QLabel("Moment"))
+        left.addWidget(h)
+        ml = QLabel("Moments")
+        ml.setObjectName("muted")
+        left.addWidget(ml)
         self.moments = QListWidget()
         self.moments.setWordWrap(True)
+        self.moments.setSpacing(2)
         self.moments.currentRowChanged.connect(lambda _: self._moment_changed())
-        lv.addWidget(self.moments, 1)
+        left.addWidget(self.moments, 1)
         self.btn_ai_all = QPushButton("✨ Write posts for all ticked")
         self.btn_ai_all.setToolTip("Let your AI write titles, captions and hashtags for every ticked moment")
         self.btn_ai_all.clicked.connect(lambda: self.write_with_ai(all_ticked=True))
-        lv.addWidget(self.btn_ai_all)
-        split.addWidget(left)
+        left.addWidget(self.btn_ai_all)
+        lw = QWidget()
+        lw.setLayout(left)
+        lw.setFixedWidth(260)
+        left.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(lw)
 
-        # ---- platforms
-        right = QWidget()
-        rv = QVBoxLayout(right)
-        rv.setContentsMargins(0, 0, 0, 0)
+        # ---- platforms (scrolls) + posting bar (always visible)
+        right = QVBoxLayout()
+        right.setSpacing(0)
         top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 10)
+        self.moment_title = QLabel("")
+        self.moment_title.setObjectName("h2")
+        top.addWidget(self.moment_title, 1)
         self.btn_ai = QPushButton("✨ Write titles, captions && hashtags with AI")
         self.btn_ai.clicked.connect(lambda: self.write_with_ai(all_ticked=False))
         top.addWidget(self.btn_ai)
-        top.addStretch()
-        rv.addLayout(top)
+        right.addLayout(top)
+
+        content = QWidget()
+        content.setObjectName("pubcontent")
+        cv = QVBoxLayout(content)
+        cv.setContentsMargins(0, 0, 12, 12)
+        cv.setSpacing(14)
         grid = QGridLayout()
-        grid.setSpacing(10)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
         self.cards: dict[str, PlatformCard] = {}
         for i, p in enumerate(pb.PLATFORMS):
             c = PlatformCard(self, p)
             self.cards[p] = c
             grid.addWidget(c, i // 2, i % 2)
-        cards_w = QWidget()
-        cards_w.setLayout(grid)
-        sc = QScrollArea()
-        sc.setWidgetResizable(True)
-        sc.setWidget(cards_w)
-        rv.addWidget(sc, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        cv.addLayout(grid)
 
+        hist = QFrame()
+        hist.setObjectName("pubcard")
+        hv = QVBoxLayout(hist)
+        hv.setContentsMargins(14, 12, 14, 14)
+        hv.setSpacing(8)
+        hh = QHBoxLayout()
+        ht = QLabel("Posted and scheduled")
+        ht.setObjectName("cardtitle")
+        hh.addWidget(ht, 1)
+        self.btn_unschedule = QPushButton("Cancel scheduled post")
+        self.btn_unschedule.clicked.connect(self._unschedule)
+        hh.addWidget(self.btn_unschedule)
+        hv.addLayout(hh)
+        self.history = QListWidget()
+        self.history.setMinimumHeight(150)
+        self.history.itemDoubleClicked.connect(self._open_result)
+        self.history.setToolTip("Double-click to open the post")
+        hv.addWidget(self.history)
+        cv.addWidget(hist)
+        cv.addStretch(1)
+        sc = _FadeScroll()
+        sc.setObjectName("pubscroll")
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidgetResizable(True)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setWidget(content)
+        right.addWidget(sc, 1)
+
+        bar = QFrame()
+        bar.setObjectName("pubbar")
+        bv = QVBoxLayout(bar)
+        bv.setContentsMargins(0, 12, 0, 0)
+        bv.setSpacing(8)
         when = QHBoxLayout()
+        when.setSpacing(10)
         self.r_now = QRadioButton("Post now")
         self.r_later = QRadioButton("Schedule for")
         self.r_now.setChecked(True)
         self.when = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
         self.when.setDisplayFormat("ddd d MMM yyyy  HH:mm")
         self.when.setCalendarPopup(True)
+        self.when.setMinimumWidth(190)
         self.when.setEnabled(False)
         self.r_later.toggled.connect(self.when.setEnabled)
         when.addWidget(self.r_now)
-        when.addSpacing(12)
+        when.addSpacing(8)
         when.addWidget(self.r_later)
         when.addWidget(self.when)
         when.addStretch()
-        rv.addLayout(when)
+        bv.addLayout(when)
         self.when_note = QLabel("YouTube schedules the post itself; the others are sent by Windows at that time "
                                 "(RumbleCut can be closed, but the PC must be on).")
         self.when_note.setObjectName("muted")
         self.when_note.setWordWrap(True)
         self.when_note.setVisible(False)
         self.r_later.toggled.connect(self.when_note.setVisible)
-        rv.addWidget(self.when_note)
+        bv.addWidget(self.when_note)
 
         prow = QHBoxLayout()
+        prow.setSpacing(10)
         self.btn_post = QPushButton("🚀 Post this moment")
         self.btn_post.setObjectName("primary")
+        self.btn_post.setMinimumHeight(36)
         self.btn_post.clicked.connect(lambda: self.post(all_ticked=False))
         self.btn_post_all = QPushButton("🚀 Post all ticked moments")
+        self.btn_post_all.setMinimumHeight(36)
         self.btn_post_all.clicked.connect(lambda: self.post(all_ticked=True))
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -215,6 +344,8 @@ class PublishTab(QWidget):
         self.progress.setFormat("")
         self.progress.valueChanged.connect(
             lambda x: self.progress.setFormat(f"{x / 10:.0f}%" if x > 0 and self.progress.maximum() else ""))
+        keep = self.progress.sizePolicy(); keep.setRetainSizeWhenHidden(True); self.progress.setSizePolicy(keep)
+        self.progress.hide()
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setObjectName("danger")
         keep = self.btn_cancel.sizePolicy(); keep.setRetainSizeWhenHidden(True); self.btn_cancel.setSizePolicy(keep)
@@ -224,29 +355,16 @@ class PublishTab(QWidget):
         prow.addWidget(self.btn_post_all)
         prow.addWidget(self.progress, 1)
         prow.addWidget(self.btn_cancel)
-        rv.addLayout(prow)
+        bv.addLayout(prow)
         self.status = QLabel("")
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
-        rv.addWidget(self.status)
-
-        rv.addWidget(QLabel("Posted and scheduled"))
-        self.history = QListWidget()
-        self.history.setMaximumHeight(130)
-        self.history.itemDoubleClicked.connect(self._open_result)
-        self.history.setToolTip("Double-click to open the post")
-        rv.addWidget(self.history)
-        hrow = QHBoxLayout()
-        self.btn_unschedule = QPushButton("Cancel scheduled post")
-        self.btn_unschedule.clicked.connect(self._unschedule)
-        hrow.addStretch()
-        hrow.addWidget(self.btn_unschedule)
-        rv.addLayout(hrow)
-        split.addWidget(right)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 4)
-        split.setSizes([260, 980])
-        v.addWidget(split, 1)
+        bv.addWidget(self.status)
+        right.addWidget(bar)
+        v.addLayout(right, 1)
+        self._hide_progress = QTimer(self)
+        self._hide_progress.setSingleShot(True)
+        self._hide_progress.timeout.connect(lambda: self._busy() or self.progress.hide())
 
         # post anything that came due while RumbleCut was open
         self._timer = QTimer(self)
@@ -301,6 +419,7 @@ class PublishTab(QWidget):
 
     def _moment_changed(self):
         c = self.current_clip()
+        self.moment_title.setText(c.title if c else "No moment selected")
         self._loading = True
         for p, card in self.cards.items():
             if c is None:
@@ -566,6 +685,8 @@ class PublishTab(QWidget):
     def _run(self, job, done, label):
         w = Worker(job)
         self._worker = w
+        self._hide_progress.stop()
+        self.progress.show()
         self.progress.setValue(0)
         self.status.setText(label)
         self.btn_cancel.setText("Cancel")
@@ -582,6 +703,7 @@ class PublishTab(QWidget):
             self._worker = None
             self.btn_cancel.hide()
             self.progress.setValue(1000 if "Cancel" not in self.status.text() else 0)
+            self._hide_progress.start(4000)
             self.refresh()
         w.finished.connect(finished)
         self.win._start(w)

@@ -135,6 +135,87 @@ def describe() -> str:
     return f"This PC · {c['local_model'] or 'no model chosen'} ({'Ollama' if c['local_kind'] == 'ollama' else 'local server'})"
 
 
+# ----------------------------------------------------------------------------- model catalogues
+# Claude models offered for cloud mode. The list is refreshed from your account (⟳) when a key is saved.
+CLOUD_MODELS = [
+    ("claude-haiku-5-5", "Claude Haiku 5.5", "fastest and cheapest - plenty for titles and highlights"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5", "balanced speed and quality"),
+    ("claude-opus-5-5", "Claude Opus 5.5", "strongest for long, complex streams"),
+    ("claude-fable-5-1", "Claude Fable 5.1", "most capable, slowest and priciest"),
+]
+
+# Well-known Ollama models you can download from inside RumbleCut (sizes are approximate downloads).
+POPULAR_LOCAL = [
+    ("llama3.2:3b", 2.0, "small, runs on almost anything"),
+    ("qwen3:4b", 2.5, "small and sharp"),
+    ("llama3.1:8b", 4.9, "solid all-rounder"),
+    ("qwen3:8b", 5.2, "good all-rounder for 8 GB GPUs"),
+    ("deepseek-r1:8b", 5.2, "thinks before answering, slower"),
+    ("gemma3:12b", 8.1, "strong writing, needs 12 GB+"),
+    ("qwen3:14b", 9.3, "better judgement, needs 12 GB+"),
+    ("gpt-oss:20b", 14.0, "OpenAI's open model, needs 16 GB"),
+    ("qwen3:30b", 19.0, "best quality here, needs 24 GB"),
+]
+
+
+def cloud_model_label(model_id: str, name: str = "", note: str = "") -> str:
+    known = {m[0]: m for m in CLOUD_MODELS}.get(model_id)
+    name = name or (known[1] if known else model_id)
+    note = note or (known[2] if known else "")
+    return f"{name}  ·  {note}" if note else name
+
+
+def list_cloud_models(key: str | None = None) -> list[dict]:
+    """Every Claude model your API key can use, newest first: {"id", "name"}."""
+    key = key or get_api_key()
+    if not key:
+        raise AIError("Add your Anthropic API key first.")
+    out, after = [], ""
+    for _ in range(10):
+        url = "https://api.anthropic.com/v1/models?limit=1000" + (f"&after_id={after}" if after else "")
+        req = urllib.request.Request(url, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.load(r)
+        except urllib.error.HTTPError as e:
+            raise AIError("Anthropic didn't accept the key (check it in console.anthropic.com)." if e.code in (401, 403)
+                          else f"Anthropic answered {e.code} when listing models.") from e
+        except urllib.error.URLError as e:
+            raise AIError(f"Couldn't reach Anthropic ({e.reason}).") from e
+        out += [{"id": m["id"], "name": m.get("display_name") or m["id"]} for m in d.get("data", [])]
+        if not d.get("has_more"):
+            break
+        after = d.get("last_id", "")
+    return out
+
+
+def pull_local_model(name: str, url: str | None = None, on_progress=None, cancel=None) -> str:
+    """Download a model into Ollama (POST /api/pull, streamed progress)."""
+    url = (url or settings()["local_url"]).rstrip("/")
+    req = urllib.request.Request(f"{url}/api/pull", data=json.dumps({"model": name, "stream": True}).encode(),
+                                 method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for line in r:
+                if cancel and cancel():
+                    raise AIError("Download stopped. Start it again to carry on where it left off.")
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                if d.get("error"):
+                    raise AIError(f"Ollama couldn't download {name}: {d['error']}")
+                total, done = d.get("total") or 0, d.get("completed") or 0
+                if on_progress:
+                    frac = done / total if total else -1
+                    on_progress(frac, f"Downloading {name}: {d.get('status', '')}"
+                                + (f"  {fmt_size(done)} of {fmt_size(total)}" if total else ""))
+                if d.get("status") == "success":
+                    return name
+    except urllib.error.URLError as e:
+        raise AIError(f"Ollama isn't running at {url}. Start it, then try again.") from e
+    return name
+
+
 # ----------------------------------------------------------------------------- local models
 def fmt_size(n: float | None) -> str:
     if not n:
