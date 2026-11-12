@@ -11,7 +11,7 @@ from PySide6.QtCore import QPoint, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QMenu, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
+    QMenu, QPlainTextEdit, QProgressBar, QToolTip, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -37,6 +37,7 @@ class ScriptView(QTextEdit):
     """The clip's words as text. Select words and press Delete to cut them."""
     cut_requested = Signal()
     restore_requested = Signal()
+    marker_dropped = Signal(int, str, float, float, str)   # clip index, "start"/"end", word t0, t1, word
     word_clicked = Signal(int)          # token index
     toggle_requested = Signal(int)
     time_clicked = Signal(float)        # a word outside the moment (project time)
@@ -53,6 +54,113 @@ class ScriptView(QTextEdit):
         self.spans: list[tuple[int, int, int]] = []      # (char start, char end, token index) - this moment
         self.wspans: list[tuple[int, int, float, float]] = []   # every word: (char a, char b, t0, t1) project time
         self._wkeys: list[int] = []
+        # ⟦3 / 3⟧ moment markers: (char a, char b, clip index, "start"/"end") - grab one and drag it to a word
+        self.markers: list[tuple[int, int, int, str]] = []
+        self._hover = None            # marker under the pointer
+        self._drag = None             # marker being dragged
+        self._target = None           # word index it would land on
+        self._play_sel: list = []
+        self.viewport().setMouseTracking(True)
+
+    # ---- extra highlighting: the word being played + the marker you're over + where a drag would land
+    def set_play_selection(self, sels: list):
+        self._play_sel = sels
+        self._apply_sel()
+
+    def _sel(self, a: int, b: int, bg: QColor, fg: QColor | None = None):
+        es = QTextEdit.ExtraSelection()
+        cur = self.textCursor()
+        cur.setPosition(a)
+        cur.setPosition(b, QTextCursor.KeepAnchor)
+        es.cursor = cur
+        es.format.setBackground(QBrush(bg))
+        if fg is not None:
+            es.format.setForeground(QBrush(fg))
+        return es
+
+    def _apply_sel(self):
+        sels = list(self._play_sel)
+        m = self._drag or self._hover
+        if m is not None:
+            sels.append(self._sel(m[0], m[1], QColor("#85C742"), QColor("#0b0d10")))   # a solid, grabbable chip
+        if self._drag is not None and self._target is not None and 0 <= self._target < len(self.wspans):
+            w = self.wspans[self._target]
+            sels.append(self._sel(w[0], w[1], QColor(133, 199, 66, 150), QColor("#ffffff")))
+        self.setExtraSelections(sels)
+
+    def _marker_at(self, pt):
+        if not self.markers:
+            return None
+        p = self.cursorForPosition(pt).position()
+        for m in self.markers:
+            if m[0] <= p <= m[1]:
+                c = self.textCursor()
+                c.setPosition(m[0])
+                ra = self.cursorRect(c)
+                c.setPosition(m[1])
+                rb = self.cursorRect(c)
+                if ra.top() - 3 <= pt.y() <= ra.bottom() + 3 and ra.left() - 3 <= pt.x() <= max(rb.right(), ra.left() + 8) + 3:
+                    return m
+        return None
+
+    def _drop_word(self, pt) -> int | None:
+        """The word a dragged marker would attach to: starts go before the word under the pointer,
+        ends go after it."""
+        if not self.wspans or self._drag is None:
+            return None
+        p = self.cursorForPosition(pt).position()
+        i = self.word_at(p)
+        if i is None:
+            return None
+        a, b = self.wspans[i][0], self.wspans[i][1]
+        if self._drag[3] == "start" and p > b and i + 1 < len(self.wspans):
+            i += 1                                     # in the gap after a word: start at the next one
+        elif self._drag[3] == "end" and p < a and i > 0:
+            i -= 1
+        return i
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            m = self._marker_at(ev.position().toPoint())
+            if m is not None:
+                self._drag, self._target = m, None
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+                self._apply_sel()
+                return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        pt = ev.position().toPoint()
+        if self._drag is not None:
+            self._target = self._drop_word(pt)
+            # scroll when dragging near the top or bottom
+            h = self.viewport().height()
+            sb = self.verticalScrollBar()
+            if pt.y() < 24:
+                sb.setValue(sb.value() - 18)
+            elif pt.y() > h - 24:
+                sb.setValue(sb.value() + 18)
+            self._apply_sel()
+            if self._target is not None:
+                w = self.wspans[self._target]
+                cc = self.textCursor()
+                cc.setPosition(w[0])
+                cc.setPosition(w[1], QTextCursor.KeepAnchor)
+                verb = "Start at" if self._drag[3] == "start" else "End after"
+                QToolTip.showText(ev.globalPosition().toPoint(), f"{verb} “{cc.selectedText()}”", self)
+            return
+        m = self._marker_at(pt)
+        if m != self._hover:
+            self._hover = m
+            self.viewport().setCursor(Qt.OpenHandCursor if m else Qt.IBeamCursor)
+            self._apply_sel()
+        super().mouseMoveEvent(ev)
+
+    def leaveEvent(self, ev):
+        if self._hover is not None and self._drag is None:
+            self._hover = None
+            self._apply_sel()
+        super().leaveEvent(ev)
 
     def word_at(self, pos: int):
         """(index into wspans) of the word at a character position, or the nearest one before it."""
@@ -95,6 +203,19 @@ class ScriptView(QTextEdit):
         super().keyPressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if self._drag is not None and ev.button() == Qt.LeftButton:
+            m, t = self._drag, self._drop_word(ev.position().toPoint())
+            self._drag, self._target, self._hover = None, None, None
+            QToolTip.hideText()
+            self.viewport().setCursor(Qt.IBeamCursor)
+            self._apply_sel()
+            if t is not None:
+                w = self.wspans[t]
+                cc = self.textCursor()
+                cc.setPosition(w[0])
+                cc.setPosition(w[1], QTextCursor.KeepAnchor)
+                self.marker_dropped.emit(m[2], m[3], w[2], w[3], cc.selectedText())
+            return
         super().mouseReleaseEvent(ev)
         if ev.button() == Qt.LeftButton and not self.textCursor().hasSelection():
             pos = self.cursorForPosition(ev.position().toPoint()).position()
@@ -232,6 +353,7 @@ class ScriptPanel(QWidget):
         self.view.toggle_requested.connect(self._toggle_token)
         self.view.time_clicked.connect(self._play_free)
         self.view.menu_requested.connect(self._word_menu)
+        self.view.marker_dropped.connect(self._marker_dropped)
         lv.addWidget(self.view, 1)
         brow = FlowLayout()
         self.btn_from = QPushButton("⟦ Start here")
@@ -533,7 +655,8 @@ class ScriptPanel(QWidget):
         keep_val = sb.value()
         v.setUpdatesEnabled(False)
         v.clear()
-        v.spans, v.wspans, v._wkeys = [], [], []
+        v.spans, v.wspans, v._wkeys, v.markers = [], [], [], []
+        v._hover = v._drag = v._target = None
         self._toks = []
         self._moment_pos = None
         ws = self._script_words()
@@ -585,14 +708,24 @@ class ScriptPanel(QWidget):
                 if x is c:
                     f.setFontPointSize(v.font().pointSizeF() * 1.15)
                 tag = "?" if x.hidden else str(i + 1)
-                f.setToolTip(f"{i + 1}. {x.title}")
+                f.setToolTip(f"{i + 1}. {x.title} - drag to move where it {'starts' if kind == 'start' else 'ends'}")
+                chip = QColor(col)
+                chip.setAlpha(70 if x is c else 40)
+                f.setBackground(QBrush(chip))        # a small chip you can grab
                 if kind == "start":
                     if x is c:
                         self._moment_pos = cur.position()
-                    cur.insertText(f"⟦{tag} ", f)
+                    a0 = cur.position()
+                    cur.insertText(f" ⟦{tag} ", f)
+                    v.markers.append((a0, cur.position(), i, "start"))
+                    cur.insertText(" ", base)
                     open_.add(i)
                 else:
+                    cur.insertText(" ", base)
+                    a0 = cur.position()
                     cur.insertText(f" {tag}⟧ ", f)
+                    v.markers.append((a0, cur.position(), i, "end"))
+                    cur.insertText(" ", base)
                     open_.discard(i)
 
         def word_tint(t):
@@ -632,8 +765,7 @@ class ScriptPanel(QWidget):
                 fmt = QTextCharFormat(base)
                 a, b = tk["start"], tk["end"]
                 if tk["kind"] == "pause":
-                    fmt.setForeground(QBrush(QColor(COL["pause"])))
-                    fmt.setFontItalic(True)
+                    fmt.setForeground(QBrush(QColor(COL["pause"])))      # upright, so ⏸ isn't clipped
                     ca, cb = se.pause_cut_range(a, b)
                     cut = se.is_cut(c, ca, cb)
                 else:
@@ -1121,6 +1253,16 @@ class ScriptPanel(QWidget):
         c.timing = [x for x in c.timing if not x.startswith(f"You set the {edge} on the script")] + [note]
         self._after_edges(c)
 
+    def _marker_dropped(self, i: int, edge: str, t0: float, t1: float, word: str):
+        """A ⟦n / n⟧ marker was dragged onto a word: move that moment's start or end there."""
+        if not (0 <= i < len(self.project.clips)):
+            return
+        c = self.project.clips[i]
+        if c is not self.current_clip():
+            self._shown_clip = c                  # no jump back to the top of it: we stay where you dropped
+            self.select_clip(c)
+        self.set_edge(edge, t0, t1, c=c, word=word)
+
     def _after_edges(self, c):
         self._stop()
         self._sync_words(c)
@@ -1422,7 +1564,7 @@ class ScriptPanel(QWidget):
         self._wt_keys = keys
         i = bisect.bisect_right(keys, tp + 0.02) - 1
         if i < 0 or v.wspans[i][3] + 0.3 < tp:
-            v.setExtraSelections([])
+            v.set_play_selection([])
             return
         sel = QTextEdit.ExtraSelection()
         cur = v.textCursor()
@@ -1430,7 +1572,7 @@ class ScriptPanel(QWidget):
         cur.setPosition(v.wspans[i][1], QTextCursor.KeepAnchor)
         sel.cursor = cur
         sel.format.setBackground(QBrush(QColor(COL["now"])))
-        v.setExtraSelections([sel])
+        v.set_play_selection([sel])
         r = v.cursorRect(cur)
         if r.bottom() > v.viewport().height() - 10 or r.top() < 0:
             sb = v.verticalScrollBar()

@@ -198,6 +198,7 @@ class ExportSettings:
     individual: bool = True
     compilation: bool = False
     thumbnails: bool = True
+    volume: float = 1.0          # loudness of the exported sound (1.0 = as it is; the player's volume never counts)
 
 
 @dataclass
@@ -481,6 +482,9 @@ def build_clip_command(clip: Clip, settings: ExportSettings, out: str | Path, tm
         a += _atempo_chain(speed)
         if clip.normalize_audio:
             a.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+        vol = float(getattr(settings, "volume", 1.0) or 0.0)
+        if abs(vol - 1.0) > 0.005:
+            a.append(f"volume={max(0.0, vol):.3f}")
         a.append("aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo")
         if fades and clip.fade_in > 0:
             a.append(f"afade=t=in:st=0:d={min(clip.fade_in, D / 3):.3f}")
@@ -598,6 +602,8 @@ def clip_settings(project: Project, clip: Clip) -> ExportSettings:
         s.quality = o["quality"]
     if o.get("height"):
         s.height = int(o["height"])
+    if o.get("volume") is not None:
+        s.volume = float(o["volume"])
     return s
 
 

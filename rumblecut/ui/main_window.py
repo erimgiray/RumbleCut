@@ -14,12 +14,12 @@ import re
 
 import numpy as np
 
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QValidator)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QDial, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QRadioButton, QScrollArea, QScrollBar, QSizePolicy, QSlider, QSpinBox, QSplitter, QStatusBar,
     QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout, QWidget,
@@ -223,6 +223,64 @@ def parse_secs(text: str):
         total += float(m.group(1)) * _UNITS[m.group(2)]
         pos = m.end()
     return int(round(total)) if pos and not t[pos:].strip() else None
+
+
+class VolumeKnob(QWidget):
+    """A small volume knob (0–200 %) with its value beside it. With follow=True it can also mean
+    “same as all” (shown as e.g. “100 % · all”); double-click puts it back to that."""
+    changed = Signal(object)          # percent (int), or None for “same as all”
+
+    def __init__(self, value: int = 100, follow: bool = False, size: int = 34):
+        super().__init__()
+        self._follow, self._own = follow, not follow
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        self.dial = QDial()
+        self.dial.setRange(0, 200)
+        self.dial.setSingleStep(5)
+        self.dial.setPageStep(25)
+        self.dial.setNotchesVisible(True)
+        self.dial.setNotchTarget(8)
+        self.dial.setFixedSize(size, size)
+        self.dial.setValue(value)
+        self.dial.setToolTip("Volume of the exported sound - turn it, or scroll on it. Double-click: back to "
+                             + ("the same as all" if follow else "100 %"))
+        self.lbl = QLabel("")
+        self.lbl.setMinimumWidth(78 if follow else 44)
+        h.addWidget(self.dial)
+        h.addWidget(self.lbl)
+        self.dial.valueChanged.connect(self._turned)
+        self.dial.installEventFilter(self)
+        self._show()
+
+    def set_value(self, pct: int, own: bool | None = None):
+        self.dial.blockSignals(True)
+        self.dial.setValue(int(pct))
+        self.dial.blockSignals(False)
+        if own is not None:
+            self._own = own
+        self._show()
+
+    def _turned(self, v):
+        self._own = True
+        self._show()
+        self.changed.emit(int(v))
+
+    def _show(self):
+        v = self.dial.value()
+        self.lbl.setText(f"{v} %" + (" · all" if self._follow and not self._own else ""))
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.MouseButtonDblClick:
+            if self._follow:
+                self._own = False
+                self._show()
+                self.changed.emit(None)
+            else:
+                self.dial.setValue(100)
+            return True
+        return False
 
 
 class RangesEditor(QWidget):
@@ -1046,7 +1104,7 @@ class MainWindow(QMainWindow):
         self.max_len.valueChanged.connect(lambda x: self.min_len.value() > x and self.min_len.setValue(x))
         self.min_gap = PresetBox([0, 10, 20, 30], fmt_secs, parse_secs, lo=0, hi=1800)
         self.min_gap.setValue(int(s["min_gap"]))
-        for b, wdt in ((self.n_clips, 64), (self.min_len, 118), (self.max_len, 118), (self.min_gap, 118)):
+        for b, wdt in ((self.n_clips, 64), (self.min_len, 132), (self.max_len, 132), (self.min_gap, 132)):
             b.setMinimumWidth(wdt)
         self.use_scenes = QCheckBox("Scene changes"); self.use_scenes.setChecked(bool(s["scene_detection"]))
         self.judge_by = QComboBox()
@@ -1087,7 +1145,7 @@ class MainWindow(QMainWindow):
         grow.addWidget(self.judge_by)
         grow.addSpacing(10)
         grow.addWidget(QLabel("🧠 Look for"))
-        self.guidance = QLineEdit(s.get("ai_guidance", ""))
+        self.guidance = QLineEdit("")              # starts empty each time RumbleCut opens
         self.guidance.setPlaceholderText("Tell the AI what you want, e.g. “funny moments”, “political hot takes”, "
                                          "“anything about Amy Acton”, “rants about the media”  (optional)")
         self.guidance.setClearButtonEnabled(True)
@@ -2992,6 +3050,9 @@ class MainWindow(QMainWindow):
         fl.addRow("Resolution", self.e_res)
         fl.addRow("Frame rate", self.e_fps)
         fl.addRow("Quality", self.e_quality)
+        self.e_vol = VolumeKnob(100)
+        self.e_vol.changed.connect(lambda v: (self._collect_export_settings(), self._fill_export_rows()))
+        fl.addRow("Volume", self.e_vol)
         fl.addRow("Watermark text", self.e_wm)
         hint = QLabel("Vertical 9:16 suits Shorts, TikTok and Reels. Resolution is the short side for "
                       "vertical and square.")
@@ -3109,6 +3170,11 @@ class MainWindow(QMainWindow):
             g.addWidget(info, 1, 2)
             g.addWidget(shape, 1, 3)
             g.addWidget(qual, 1, 4, 1, 2)
+            own = (c.export_opts or {}).get("volume")
+            knob = VolumeKnob(round((own if own is not None else self.e_vol.dial.value() / 100) * 100),
+                              follow=True, size=30)
+            knob.set_value(knob.dial.value(), own=own is not None)
+            g.addWidget(knob, 0, 6, 2, 1)
             g.addWidget(status, 2, 2, 1, 4)
             status.hide()
             g.setColumnStretch(2, 3)
@@ -3124,6 +3190,15 @@ class MainWindow(QMainWindow):
             name.textEdited.connect(lambda t, opt=opt: opt("name", t.strip()))
             shape.currentIndexChanged.connect(lambda _, cb=shape, opt=opt: opt("aspect", cb.currentData()))
             qual.currentIndexChanged.connect(lambda _, cb=qual, opt=opt: opt("quality", cb.currentData()))
+            def vol_changed(v, c=c, knob=knob):
+                o = dict(c.export_opts or {})
+                if v is None:
+                    o.pop("volume", None)
+                    knob.set_value(self.e_vol.dial.value(), own=False)
+                else:
+                    o["volume"] = v / 100
+                c.export_opts = o
+            knob.changed.connect(vol_changed)
             tick.toggled.connect(lambda on, c=c: self._set_enabled(c, on))
             b_exp.clicked.connect(lambda _=False, c=c: self._export_one(c))
             b_edit.clicked.connect(lambda _=False, c=c: (self.tabs.setCurrentIndex(1),
@@ -3199,6 +3274,7 @@ class MainWindow(QMainWindow):
         e.thumbnails = self.e_thumbs.isChecked()
         e.transition = self.e_trans.currentText()
         e.transition_duration = self.e_tdur.value()
+        e.volume = self.e_vol.dial.value() / 100
 
     def _apply_export_settings(self):
         e = self.project.export
@@ -3207,6 +3283,7 @@ class MainWindow(QMainWindow):
         self.e_wm.setText(e.watermark); self.e_indiv.setChecked(e.individual)
         self.e_comp.setChecked(e.compilation); self.e_thumbs.setChecked(e.thumbnails)
         self.e_trans.setCurrentText(e.transition); self.e_tdur.setValue(e.transition_duration)
+        self.e_vol.set_value(round(getattr(e, "volume", 1.0) * 100))
 
     def run_export(self):
         if not any(c.enabled for c in self.project.clips):
@@ -4426,6 +4503,24 @@ class MainWindow(QMainWindow):
 
 
 # ============================================================================ theme
+def _ui_icon_file(name: str, svg: str) -> str:
+    """Small icons the stylesheet needs (it can only take image files)."""
+    try:
+        p = config.app_data_dir() / f"ui-{name}.svg"
+        if not p.exists() or p.read_text(encoding="utf-8") != svg:
+            p.write_text(svg, encoding="utf-8")
+        return p.as_posix()
+    except Exception:
+        return ""
+
+
+_ARROW = _ui_icon_file("arrow-down", '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+                       '<path d="M0.5 0.5 L5 5.2 L9.5 0.5 Z" fill="#9ca3af"/></svg>')
+_ARROW_HI = _ui_icon_file("arrow-down-hi", '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+                          '<path d="M0.5 0.5 L5 5.2 L9.5 0.5 Z" fill="#e5e7eb"/></svg>')
+_ARROW_UP = _ui_icon_file("arrow-up", '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5" viewBox="0 0 10 6">'
+                          '<path d="M0.5 5.5 L5 0.8 L9.5 5.5 Z" fill="#9ca3af"/></svg>')
+
 STYLE = f"""
 * {{ font-size: 10pt; }}
 QMainWindow, QWidget {{ background: #1b1d22; color: #e5e7eb; }}
@@ -4455,6 +4550,21 @@ QScrollArea#pubscroll, QWidget#pubcontent {{ background: transparent; }}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ background: #121418; border: 1px solid #2f343d;
     border-radius: 6px; padding: 5px 7px 5px 11px; selection-background-color: {ACCENT}; }}
 QComboBox QAbstractItemView {{ background: #1f2228; border: 1px solid #2c3038; selection-background-color: #2d3a22; padding: 4px; }}
+QComboBox {{ padding-left: 9px; padding-right: 22px; }}
+QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 20px;
+    border: none; background: transparent; }}
+QComboBox::down-arrow {{ image: url({_ARROW}); width: 10px; height: 6px; }}
+QComboBox::down-arrow:hover, QComboBox::down-arrow:on {{ image: url({_ARROW_HI}); }}
+QSpinBox, QDoubleSpinBox {{ padding-right: 22px; }}
+QDial {{ background: transparent; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right;
+    width: 20px; border: none; border-left: 1px solid #2f343d; border-top-right-radius: 6px; margin: 1px 1px 0 0; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 20px; border: none; border-left: 1px solid #2f343d; border-bottom-right-radius: 6px; margin: 0 1px 1px 0; }}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{ background: #2a2e36; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url({_ARROW_UP}); width: 8px; height: 5px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url({_ARROW}); width: 8px; height: 5px; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QPushButton, QToolButton {{ background: #2a2e36; border: 1px solid #353a44; border-radius: 6px; padding: 6px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background: #333844; }}
