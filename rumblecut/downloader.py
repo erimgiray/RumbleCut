@@ -24,6 +24,22 @@ QUALITY_FORMATS = {
     "Audio only": "ba/b",
 }
 
+# Formats tried, in order, when only parts of a stream are downloaded. ffmpeg cuts those parts
+# straight from Rumble's servers, and it reads a plain single-file MP4 most reliably (the same
+# kind the sound scan uses). Rumble's "timeline" previews are skipped - ffmpeg can't cut them
+# ("Invalid data found", exit code 3199971767). If one kind fails, the next is tried.
+def _section_formats(quality: str) -> list[str]:
+    h = {"1080p": 1080, "720p": 720, "480p": 480}.get(quality)
+    cap = f"[height<={h}]" if h else ""
+    nt = "[format_id!*=timeline]"
+    return [
+        f"b{cap}[protocol^=http][ext=mp4]{nt}/b{cap}[protocol^=http]{nt}",
+        f"b{cap}[protocol*=m3u8]{nt}/bv*{cap}[protocol*=m3u8]{nt}+ba",
+        f"b{cap}{nt}/b{nt}",
+        f"bv*{cap}{nt}+ba/b{cap}/b",
+    ]
+
+
 RUMBLE_RE = re.compile(r"^https?://(www\.)?rumble\.com/", re.I)
 
 
@@ -244,22 +260,38 @@ def download(url: str, quality: str = "1080p", out_dir: str | Path | None = None
     if ranges and on_progress:
         on_progress(-1.0, f"Downloading part 1 of {n_sections}…" if n_sections > 1
                     else "Downloading the selected part…")
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info.get("_type") == "playlist" and info.get("entries"):
-                info = next(e for e in info["entries"] if e)
-            paths: list[str] = []
-            for rd in info.get("requested_downloads") or []:
-                fp = rd.get("filepath") or rd.get("_filename")
-                if fp and fp not in paths:
-                    paths.append(fp)
-            if not paths:
-                paths = [ydl.prepare_filename(info)]
-    except yt_dlp.utils.DownloadError as e:
-        if cancel and cancel():
-            raise Cancelled() from e
-        raise RuntimeError(_friendly_error(str(e))) from e
+    attempts = ([opts["format"]] if audio_only or not ranges
+                else _section_formats(quality))
+    last_err = None
+    for n, fmt_str in enumerate(attempts):
+        opts["format"] = fmt_str
+        state["section"] = 0
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info.get("_type") == "playlist" and info.get("entries"):
+                    info = next(e for e in info["entries"] if e)
+                paths: list[str] = []
+                for rd in info.get("requested_downloads") or []:
+                    fp = rd.get("filepath") or rd.get("_filename")
+                    if fp and fp not in paths:
+                        paths.append(fp)
+                if not paths:
+                    paths = [ydl.prepare_filename(info)]
+            break
+        except yt_dlp.utils.DownloadError as e:
+            if cancel and cancel():
+                raise Cancelled() from e
+            last_err = e
+            msg = str(e).lower()
+            retry = ("ffmpeg exited" in msg or "invalid data" in msg
+                     or "requested format is not available" in msg)
+            if not retry or n == len(attempts) - 1:
+                raise RuntimeError(_friendly_error(str(e))) from e
+            if on_progress:
+                on_progress(-1.0, "That version of the video couldn't be cut - trying another…")
+    else:   # pragma: no cover - loop always breaks or raises
+        raise RuntimeError(_friendly_error(str(last_err)))
 
     files = []
     for p in paths:
@@ -348,4 +380,9 @@ def _friendly_error(msg: str) -> str:
         return ("Rumble refused the download (403). The video may be private, members-only or "
                 "region-locked, or Rumble changed something - try Settings → Updates → "
                 "update the Rumble downloader." + hint)
+    if "ffmpeg exited" in m or "invalid data" in m:
+        return ("Rumble's server sent something ffmpeg couldn't read while cutting out the parts, "
+                "even after trying every version of the video. Try again in a minute, pick a "
+                "different quality, or update the Rumble downloader (Settings → Updates).\n\n"
+                "Details: " + msg.replace("ERROR: ", ""))
     return msg.replace("ERROR: ", "")
