@@ -10,7 +10,7 @@ import time
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QMenu, QPlainTextEdit, QProgressBar, QToolTip, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -60,7 +60,43 @@ class ScriptView(QTextEdit):
         self._drag = None             # marker being dragged
         self._target = None           # word index it would land on
         self._play_sel: list = []
+        self._last_pt = None
+        self._auto = QTimer(self)                 # keeps scrolling while you hold a marker near the top/bottom
+        self._auto.setInterval(40)
+        self._auto.timeout.connect(self._autoscroll)
         self.viewport().setMouseTracking(True)
+        # when you scroll yourself, the text stops following the playing word for a few seconds
+        self._prog = False
+        self.user_scrolled_at = 0.0
+        self.verticalScrollBar().valueChanged.connect(self._scrolled)
+
+    def _scrolled(self, _):
+        if not self._prog:
+            self.user_scrolled_at = time.monotonic()
+
+    def scroll_to(self, value: int):
+        """Scroll from code (doesn't count as you scrolling)."""
+        self._prog = True
+        try:
+            self.verticalScrollBar().setValue(int(value))
+        finally:
+            self._prog = False
+
+    def _autoscroll(self):
+        if self._drag is None or self._last_pt is None:
+            self._auto.stop()
+            return
+        h, y = self.viewport().height(), self._last_pt.y()
+        sb = self.verticalScrollBar()
+        step = 0
+        if y < 28:
+            step = -max(6, (28 - y) * 2)
+        elif y > h - 28:
+            step = max(6, (y - (h - 28)) * 2)
+        if step:
+            sb.setValue(sb.value() + int(step))
+            self._target = self._drop_word(self._last_pt)
+            self._apply_sel()
 
     # ---- extra highlighting: the word being played + the marker you're over + where a drag would land
     def set_play_selection(self, sels: list):
@@ -89,17 +125,22 @@ class ScriptView(QTextEdit):
         self.setExtraSelections(sels)
 
     def _marker_at(self, pt):
+        """The ⟦n / n⟧ marker under the pointer - checked character by character, so a marker that sits at the
+        start or end of a line (or wraps) can still be grabbed."""
         if not self.markers:
             return None
         p = self.cursorForPosition(pt).position()
+        c = self.textCursor()
         for m in self.markers:
-            if m[0] <= p <= m[1]:
-                c = self.textCursor()
-                c.setPosition(m[0])
+            if not (m[0] - 1 <= p <= m[1] + 1):
+                continue
+            for k in range(m[0], m[1]):
+                c.setPosition(k)
                 ra = self.cursorRect(c)
-                c.setPosition(m[1])
+                c.setPosition(k + 1)
                 rb = self.cursorRect(c)
-                if ra.top() - 3 <= pt.y() <= ra.bottom() + 3 and ra.left() - 3 <= pt.x() <= max(rb.right(), ra.left() + 8) + 3:
+                right = rb.left() if rb.top() == ra.top() and rb.left() > ra.left() else ra.left() + 10
+                if ra.top() - 3 <= pt.y() <= ra.bottom() + 3 and ra.left() - 3 <= pt.x() <= right + 3:
                     return m
         return None
 
@@ -132,14 +173,10 @@ class ScriptView(QTextEdit):
     def mouseMoveEvent(self, ev):
         pt = ev.position().toPoint()
         if self._drag is not None:
+            self._last_pt = pt
             self._target = self._drop_word(pt)
-            # scroll when dragging near the top or bottom
-            h = self.viewport().height()
-            sb = self.verticalScrollBar()
-            if pt.y() < 24:
-                sb.setValue(sb.value() - 18)
-            elif pt.y() > h - 24:
-                sb.setValue(sb.value() + 18)
+            if not self._auto.isActive():
+                self._auto.start()
             self._apply_sel()
             if self._target is not None:
                 w = self.wspans[self._target]
@@ -206,6 +243,7 @@ class ScriptView(QTextEdit):
         if self._drag is not None and ev.button() == Qt.LeftButton:
             m, t = self._drag, self._drop_word(ev.position().toPoint())
             self._drag, self._target, self._hover = None, None, None
+            self._auto.stop()
             QToolTip.hideText()
             self.viewport().setCursor(Qt.IBeamCursor)
             self._apply_sel()
@@ -268,7 +306,7 @@ class ScriptPanel(QWidget):
         self.moment.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.moment.currentIndexChanged.connect(lambda _: self._moment_changed())
         top.addWidget(self.moment, 1)
-        self.btn_load = QPushButton("📝 Get the script")
+        self.btn_load = QPushButton("📝 Get script")
         self.btn_load.setObjectName("primary")
         self.btn_load.setToolTip("Write out every word of the whole stream with its exact timing - the moments "
                                  "first, then everything before and after. You can stop and carry on later.")
@@ -299,16 +337,16 @@ class ScriptPanel(QWidget):
         v.addWidget(self.clip_tl)
 
         tools = FlowLayout()
-        self.btn_clean = QPushButton("🧹 Quick clean-up")
+        self.btn_clean = QPushButton("🧹 Clean up")
         self.btn_clean.setToolTip("Suggest cutting “um”/“uh”, stutters and repeats, long pauses, and bits "
                                   "the script missed (usually fillers). You approve them.")
         self.btn_clean.clicked.connect(self.quick_cleanup)
-        self.btn_ai = QPushButton("✨ Tighten with AI")
+        self.btn_ai = QPushButton("✨ AI tighten")
         self.btn_ai.setToolTip("Your AI suggests asides, false starts and repeated points to cut")
         self.btn_ai.clicked.connect(self.ai_tighten)
-        self.btn_accept_all = QPushButton("✓ Accept all suggestions")
+        self.btn_accept_all = QPushButton("✓ Accept all")
         self.btn_accept_all.clicked.connect(lambda: self._accept(all_=True))
-        self.btn_dismiss_all = QPushButton("Dismiss suggestions")
+        self.btn_dismiss_all = QPushButton("✖ Dismiss all")
         self.btn_dismiss_all.clicked.connect(lambda: self._dismiss(all_=True))
         self.jump = QComboBox()
         self.jump.addItem("Jump cuts: punch-in zoom", "punch")
@@ -365,16 +403,17 @@ class ScriptPanel(QWidget):
         self.btn_sel = QPushButton("⟦ Selection ⟧")
         self.btn_sel.setToolTip("Make the selected words the moment")
         self.btn_sel.clicked.connect(self._selection_to_moment)
-        self.btn_find = QPushButton("⌖ Go to the moment")
+        self.btn_find = QPushButton("⌖ Find")
         self.btn_find.clicked.connect(lambda: self._scroll_to_moment())
+        self.btn_find.setToolTip("Scroll back to the selected moment")
         for b in (self.btn_from, self.btn_to, self.btn_sel, self.btn_find):
             brow.addWidget(b)
         brow.addStretch()
         lv.addLayout(brow)
         erow = FlowLayout()
-        self.btn_cut = QPushButton("✂ Cut selected  (Del)")
+        self.btn_cut = QPushButton("✂ Cut")
         self.btn_cut.clicked.connect(self.cut_selected)
-        self.btn_restore = QPushButton("↩ Restore selected  (Enter)")
+        self.btn_restore = QPushButton("↩ Restore")
         self.btn_restore.clicked.connect(self.restore_selected)
         self.btn_accept = QPushButton("✓ Accept")
         self.btn_accept.setToolTip("Accept the suggestions you've selected")
@@ -423,13 +462,13 @@ class ScriptPanel(QWidget):
         self.stack.addWidget(self.note)
         rv.addWidget(self.stack, 1)
         trow = QHBoxLayout()
-        self.btn_play = QPushButton("▶ Play the edit")
+        self.btn_play = QPushButton("▶ Play")
         self.btn_play.setObjectName("primary")
         self.btn_play.setToolTip("Plays the moment skipping everything you've cut")
         self.btn_play.clicked.connect(self.play_toggle)
         self.pos_label = QLabel("")
         self.pos_label.setObjectName("muted")
-        self.btn_fx = QPushButton("👁 Preview with effects")
+        self.btn_fx = QPushButton("👁 Preview")
         self.btn_fx.setToolTip("Renders the moment with its cuts, speed, look, fades, caption and pictures "
                                "(small, quick) and plays it here")
         self.btn_fx.clicked.connect(self.preview_effects)
@@ -546,10 +585,13 @@ class ScriptPanel(QWidget):
         writing = busy and getattr(self, "_writing", False)
         self.btn_load.setEnabled(bool(self.project.source) and (not busy or writing))
         frac = self._written_fraction()
-        self.btn_load.setText("■ Stop writing" if writing else
-                              "📝 Get the script" if frac <= 0 else
-                              f"📝 Carry on with the script ({frac * 100:.0f}% done)" if frac < 0.995 else
-                              "📝 Get the script again")
+        self.btn_load.setText("■ Stop" if writing else
+                              "📝 Get script" if frac <= 0 else
+                              f"📝 Continue ({frac * 100:.0f}%)" if frac < 0.995 else
+                              "📝 Redo script")
+        self.btn_load.setToolTip("Stop writing out the stream (you can carry on later)" if writing else
+                                 "Write out every word of the whole stream with its timing - the moments first, "
+                                 "then everything before and after them")
         for b in (self.btn_from, self.btn_to, self.btn_sel):
             b.setEnabled(c is not None and bool(self.view.wspans))
         self.btn_find.setEnabled(c is not None)
@@ -716,14 +758,14 @@ class ScriptPanel(QWidget):
                     if x is c:
                         self._moment_pos = cur.position()
                     a0 = cur.position()
-                    cur.insertText(f" ⟦{tag} ", f)
+                    cur.insertText(f"\u00a0⟦{tag}\u00a0", f)      # no-break spaces: the chip never splits
                     v.markers.append((a0, cur.position(), i, "start"))
                     cur.insertText(" ", base)
                     open_.add(i)
                 else:
                     cur.insertText(" ", base)
                     a0 = cur.position()
-                    cur.insertText(f" {tag}⟧ ", f)
+                    cur.insertText(f"\u00a0{tag}⟧\u00a0", f)
                     v.markers.append((a0, cur.position(), i, "end"))
                     cur.insertText(" ", base)
                     open_.discard(i)
@@ -846,7 +888,7 @@ class ScriptPanel(QWidget):
         if scroll == "moment":
             self._scroll_to_moment()
         else:
-            sb.setValue(keep_val)
+            v.scroll_to(keep_val)
         self._last_render = time.monotonic()
         self._lengths()
 
@@ -860,7 +902,7 @@ class ScriptPanel(QWidget):
         v.ensureCursorVisible()
         r = v.cursorRect(cur)
         sb = v.verticalScrollBar()
-        sb.setValue(sb.value() + r.top() - v.viewport().height() // 5)
+        v.scroll_to(sb.value() + r.top() - v.viewport().height() // 5)
 
     def _lengths(self):
         c = self.current_clip()
@@ -1345,36 +1387,44 @@ class ScriptPanel(QWidget):
         sa, sb_, stext = self._sentence(t0)
         has_sel = v.textCursor().hasSelection()
         m = QMenu(self)
+        m.setToolTipsVisible(True)
+
+        def act(menu, text, fn, tip=""):
+            x = menu.addAction(text, fn)
+            if tip:
+                x.setToolTip(tip)
+            return x
         if c is not None:
             n = self.project.clips.index(c) + 1
-            m.addSection(f"Moment {n}: {c.title[:40]}")
-            m.addAction(f"⟦  Start it at “{word}”", lambda: self.set_edge("start", t0, t1, word=word))
-            m.addAction(f"End it after “{word}”  ⟧", lambda: self.set_edge("end", t0, t1, word=word))
-            m.addAction("⟦  Start it where this sentence starts",
-                        lambda: self.set_edge("start", sa, sa, word=stext.split(" ")[0] if stext else ""))
-            m.addAction("End it where this sentence ends  ⟧",
-                        lambda: self.set_edge("end", sb_, sb_, word=stext.split(" ")[-1] if stext else ""))
+            act(m, "⟦ Start here", lambda: self.set_edge("start", t0, t1, word=word),
+                f"Start moment {n} at “{word}”")
+            act(m, "End here ⟧", lambda: self.set_edge("end", t0, t1, word=word), f"End moment {n} after “{word}”")
+            act(m, "⟦ Start of sentence", lambda: self.set_edge("start", sa, sa, word=stext.split(" ")[0] if stext else ""),
+                f"Start moment {n} where this sentence starts")
+            act(m, "End of sentence ⟧", lambda: self.set_edge("end", sb_, sb_, word=stext.split(" ")[-1] if stext else ""),
+                f"End moment {n} where this sentence ends")
             if has_sel:
-                m.addAction("⟦ Make the selected words the moment ⟧", self._selection_to_moment)
-            inside = c.start + c.offset <= t0 < c.end + c.offset
-            if inside:
+                act(m, "⟦ Selection ⟧", self._selection_to_moment, f"Make the selected words moment {n}")
+            if c.start + c.offset <= t0 < c.end + c.offset:
                 m.addSeparator()
-                m.addAction("✂  Cut selected  (Del)", self.cut_selected)
-                m.addAction("↩  Restore selected  (Enter)", self.restore_selected)
+                x = act(m, "✂ Cut", self.cut_selected, "Cut the selected words from the clip")
+                x.setShortcut(QKeySequence.Delete)
+                x = act(m, "↩ Restore", self.restore_selected, "Bring the selected words back")
+                x.setShortcut(QKeySequence(Qt.Key_Return))
         others = [(k, x) for k, x in enumerate(self.project.clips)
                   if x is not c and x.start + x.offset <= t0 < x.end + x.offset]
         if others:
             m.addSeparator()
             for k, x in others:
-                m.addAction(f"Go to moment {k + 1}: {x.title[:40]}", lambda x=x: self.select_clip(x))
+                act(m, f"→ Go to {k + 1}", lambda x=x: self.select_clip(x), f"Go to moment {k + 1}: {x.title}")
         m.addSeparator()
-        m.addAction("＋  New moment from this sentence", lambda: self._new_moment(sa, sb_, stext))
+        act(m, "＋ New moment", lambda: self._new_moment(sa, sb_, stext), "A new moment from this sentence")
         if has_sel:
             r = self._cursor_words()
             if r:
-                m.addAction("＋  New moment from the selected words",
-                            lambda: self._new_moment(r[0][0], r[1][1], f"{r[0][2]} … {r[1][2]}"))
-        m.addAction("▶  Play from here", lambda: self._play_free(t0))
+                act(m, "＋ Moment from selection", lambda: self._new_moment(r[0][0], r[1][1], f"{r[0][2]} … {r[1][2]}"),
+                    "A new moment from the selected words")
+        act(m, "▶ Play here", lambda: self._play_free(t0))
         self._exec_menu(m, gpos)
 
     def _exec_menu(self, m, gpos):
@@ -1441,11 +1491,14 @@ class ScriptPanel(QWidget):
             self.pos_label.setText(f"{fmt_time(c.to_out(tp - c.offset))} / {fmt_time(c.out_length)}")
         else:
             self.pos_label.setText(fmt_time(self.project.to_stream(tp)))
-        self._highlight_time(tp)
+        last = getattr(self, "_last_tp", None)
+        self._last_tp = tp
+        # a jump while paused (a click on a timeline, ⏮ / ⏭) brings that part of the text into view
+        self._highlight_time(tp, jump=(not self._playing() and last is not None and abs(tp - last) > 1.0))
 
     def _state_changed(self, state):
         playing = state == QMediaPlayer.PlayingState
-        self.btn_play.setText("■ Stop" if playing else "▶ Play the edit")
+        self.btn_play.setText("■ Stop" if playing else "▶ Play")
         if playing:
             self.win.pause_studio()             # only one player at a time
         else:
@@ -1519,7 +1572,7 @@ class ScriptPanel(QWidget):
             self.player.pause()
         self._stop_at = None
         self._free_play = False
-        self.btn_play.setText("▶ Play the edit")
+        self.btn_play.setText("▶ Play")
         self.clip_tl.set_playing(False)
         self.overview.set_playing(-1)
 
@@ -1555,7 +1608,7 @@ class ScriptPanel(QWidget):
         self.player.play()
         self.btn_play.setText("■ Stop")
 
-    def _highlight_time(self, tp: float):
+    def _highlight_time(self, tp: float, jump: bool = False):
         """Mark the word being heard (project time) and keep it in view."""
         v = self.view
         if not v.wspans:
@@ -1574,9 +1627,15 @@ class ScriptPanel(QWidget):
         sel.format.setBackground(QBrush(QColor(COL["now"])))
         v.set_play_selection([sel])
         r = v.cursorRect(cur)
-        if r.bottom() > v.viewport().height() - 10 or r.top() < 0:
-            sb = v.verticalScrollBar()
-            sb.setValue(sb.value() + r.top() - v.viewport().height() // 3)
+        # follow the word only while it plays, never fighting you: not within 4 s of you scrolling or
+        # selecting, and not while you hold the mouse button down
+        if jump and (r.bottom() > v.viewport().height() - 10 or r.top() < 0):
+            v.scroll_to(v.verticalScrollBar().value() + r.top() - v.viewport().height() // 3)   # you jumped there
+        elif (self._playing() and time.monotonic() - v.user_scrolled_at > 4.0
+                and not (QApplication.mouseButtons() & Qt.LeftButton)
+                and not v.textCursor().hasSelection()
+                and (r.bottom() > v.viewport().height() - 10 or r.top() < 0)):
+            v.scroll_to(v.verticalScrollBar().value() + r.top() - v.viewport().height() // 3)
 
     def _pos(self, ms):
         c = self.current_clip()

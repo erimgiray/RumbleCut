@@ -1501,7 +1501,7 @@ class MainWindow(QMainWindow):
         fl.addRow("Start", self.i_start)
         fl.addRow("End", self.i_end)
         fl.addRow("Length", self.i_len)
-        self.btn_script = QPushButton("✂ Cut words by script")
+        self.btn_script = QPushButton("✂ Script")
         self.btn_script.setToolTip("Open this moment's script in 🎬 Edit clips: delete words in the text and "
                                    "they're cut from the clip")
         self.btn_script.clicked.connect(self.edit_script_for_current)
@@ -2252,7 +2252,7 @@ class MainWindow(QMainWindow):
         if self.clip_list.currentRow() != r:
             self.clip_list.setCurrentRow(r)
         m = QMenu(self)
-        m.addAction("▶  Play this moment", play or self.play_clip)
+        m.addAction("▶  Play", play or self.play_clip)
         # --- trim
         tm = m.addMenu("✂  Trim")
         if t is not None:
@@ -2266,27 +2266,27 @@ class MainWindow(QMainWindow):
         ph = self._player_pos() if self.player and self._media_offset is not None else None
         ph_in = ph is not None and c.start + 1.0 < ph < c.end - 1.0 and \
             self.player.source() == QUrl.fromLocalFile(c.source)
-        a = tm.addAction("Start at the playhead", lambda: self._trim_clip(c, "start", ph))
+        a = tm.addAction("Start at playhead", lambda: self._trim_clip(c, "start", ph))
         a.setEnabled(bool(ph_in))
-        a = tm.addAction("End at the playhead", lambda: self._trim_clip(c, "end", ph))
+        a = tm.addAction("End at playhead", lambda: self._trim_clip(c, "end", ph))
         a.setEnabled(bool(ph_in))
         tm.addSeparator()
-        tm.addAction("Cut words by script…", self.edit_script_for_current)
+        tm.addAction("Edit script…", self.edit_script_for_current)
         if t is not None:
             pos_in = t - c.offset
-            a = m.addAction(f"⫽  Split into two at {fmt_time(self.project.to_stream(t))}",
+            a = m.addAction(f"⫽  Split at {fmt_time(self.project.to_stream(t))}",
                             lambda: self._split_clip(c, pos_in))
             a.setEnabled(c.start + 1.0 < pos_in < c.end - 1.0)
         # --- reset
         rm = m.addMenu("↺  Reset")
         o = c.orig if len(c.orig) == 2 else [c.start, c.end]
         moved = abs(o[0] - c.start) > 0.05 or abs(o[1] - c.end) > 0.05
-        a = rm.addAction(f"Timing back to how it was found ({fmt_time(self.project.to_stream(o[0] + c.offset))} – "
+        a = rm.addAction(f"Timing ({fmt_time(self.project.to_stream(o[0] + c.offset))} – "
                          f"{fmt_time(self.project.to_stream_end(o[1] + c.offset))})", lambda: self._reset_clip(c, "timing"))
         a.setEnabled(moved)
-        a = rm.addAction(f"Remove script cuts ({len(c.cuts)})", lambda: self._reset_clip(c, "cuts"))
+        a = rm.addAction(f"Script cuts ({len(c.cuts)})", lambda: self._reset_clip(c, "cuts"))
         a.setEnabled(bool(c.cuts))
-        rm.addAction("Effects back to normal", lambda: self._reset_clip(c, "effects"))
+        rm.addAction("Effects", lambda: self._reset_clip(c, "effects"))
         rm.addSeparator()
         rm.addAction("Everything", lambda: self._reset_clip(c, "all"))
         # --- AI: where should the clip(s) this moment overlaps start or end?
@@ -2295,29 +2295,29 @@ class MainWindow(QMainWindow):
         starts_in = [o for o in others if c.start - 0.05 <= o.start <= c.end + 0.05]
         ends_in = [o for o in others if c.start - 0.05 <= o.end <= c.end + 0.05 and o not in starts_in]
         ok = ai.is_configured() and transcribe.available()
-        tip = "" if ok else "  (needs an AI model and speech-to-text - Settings → AI models)"
+        tip = "" if ok else "  (set up AI first)"
         for o in starts_in:
-            a = m.addAction(f"✨  AI: find a good start for “{o.title[:40]}”" + tip,
+            a = m.addAction(f"✨  AI start for “{o.title[:24]}”" + tip,
                             lambda o=o: self.ai_boundary(o, "start", near=c))
             a.setEnabled(ok)
         for o in ends_in:
-            a = m.addAction(f"✨  AI: find a good end for “{o.title[:40]}”" + tip,
+            a = m.addAction(f"✨  AI end for “{o.title[:24]}”" + tip,
                             lambda o=o: self.ai_boundary(o, "end", near=c))
             a.setEnabled(ok)
-        am = m.addMenu("✨  AI: this moment's start or end")
+        am = m.addMenu("✨  AI start / end")
         am.setEnabled(ok)
-        am.addAction("Find a good start", lambda: self.ai_boundary(c, "start"))
-        am.addAction("Find a good end", lambda: self.ai_boundary(c, "end"))
+        am.addAction("Find start", lambda: self.ai_boundary(c, "start"))
+        am.addAction("Find end", lambda: self.ai_boundary(c, "end"))
         m.addSeparator()
         m.addAction("💾  Save as clip…", lambda: self.save_clip_as(c))
         m.addAction("⧉  Duplicate", self.duplicate_clip)
-        m.addAction("👁  Show this moment" if c.hidden else "🙈  Hide this moment",
+        m.addAction("👁  Show" if c.hidden else "🙈  Hide",
                     lambda: self._set_hidden(c, not c.hidden))
-        m.addAction("☐  Deselect (don't export)" if c.enabled else "☑  Select (export it)",
+        m.addAction("☐  Deselect" if c.enabled else "☑  Select",
                     lambda: self.clip_list.item(self.project.clips.index(c)).setCheckState(
                         Qt.Unchecked if c.enabled else Qt.Checked))
         m.addSeparator()
-        m.addAction("🗑  Delete this moment", self.remove_clip)
+        m.addAction("🗑  Delete", self.remove_clip)
         self._exec_menu(m, gpos)
 
     # ------------------------------------------------------------------ undo / redo

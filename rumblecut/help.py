@@ -131,15 +131,15 @@ Right-click a moment - on either timeline or in the Moments list:
 - **▶ Play this moment**
 - **✂ Trim** - start or end it at the spot you clicked or at the playhead, or cut words by script
 - **Split** it in two at the spot you clicked
-- **✨ AI: find a good start / end for "…"** - shown when the moment you right-click covers the start or end
+- **✨ AI start / end for "…"** - shown when the moment you right-click covers the start or end
   of another clip. RumbleCut listens around that point and your AI picks the sentence where the clip should
   begin (so the topic is introduced first) or end (right after the payoff).
-- **✨ AI: this moment's start or end** - the same, for the moment itself
+- **✨ AI start / end** (submenu) - the same, for the moment itself
 - **↺ Reset** - timing back to how it was found, remove script cuts, effects back to normal, or everything
 - **💾 Save as clip…** - export just this moment wherever you choose
 - **⧉ Duplicate**
-- **🙈 Hide this moment** - it becomes a see-through box with faint diagonal lines and a **?**, everywhere.
-  Still exported if ticked. **👁 Show this moment** brings it back.
+- **🙈 Hide** - it becomes a see-through box with faint diagonal lines and a **?**, everywhere.
+  Still exported if ticked. **👁 Show** brings it back.
 - **Deselect / Select** (whether it's exported) and **Delete**
 
 **Ctrl+Z / Ctrl+Shift+Z** undo and redo any of these (also in ☰ → Edit).
@@ -165,30 +165,29 @@ The **✂ Script** tab beside the player shows the **whole stream's text**, with
 
 **Writing it out** - opening the tab starts writing the whole stream out word by word in the background:
 around the selected moment first, then the other moments, then everything else. Until a part is done you
-see the rougher text from the scan in grey. **■ Stop writing** pauses it; press the button again to carry
+see the rougher text from the scan in grey. **■ Stop** pauses it; press the button again to carry
 on. It's saved with your work. (With an NVIDIA graphics card and the GPU speed-up installed it's much
 faster.)
 
 **Change where a moment starts and ends**
 - **Drag the markers** - hover a **⟦3** or **3⟧** until it becomes a solid chip and the pointer a hand,
   then drag it onto a word. The word it will land on is highlighted while you drag.
-- **Right-click any word** - *Start it at "word"*, *End it after "word"*, or start/end it where that
-  sentence starts or ends (by its punctuation). Also: **＋ New moment from this sentence** (or from the
-  selected words), go to another moment, play from there.
+- **Right-click any word** - **⟦ Start here**, **End here ⟧**, **⟦ Start of sentence**, **End of sentence ⟧** (by its
+  punctuation). Also: **＋ New moment** from the sentence (or **＋ Moment from selection**), go to another moment, play from there.
 - **⟦ Start here / End here ⟧** use the word you clicked; **⟦ Selection ⟧** makes the selected words the
   moment.
 
 **Cut words** (inside the selected moment)
 - Select words and press **Delete** to cut them, **Enter** to bring them back; double-click toggles a word.
   The video follows the text.
-- **🧹 Quick clean-up** suggests cutting "um"/"uh", stutters, repeated words and long pauses.
-  **✨ Tighten with AI** suggests cutting asides, false starts and restated points. Suggestions show amber
+- **🧹 Clean up** suggests cutting "um"/"uh", stutters, repeated words and long pauses.
+  **✨ AI tighten** suggests cutting asides, false starts and restated points. Suggestions show amber
   and struck through: **✓ Accept** or **✖ Keep** each, or all at once.
 - **⏸ 0.9s** marks a pause; **[… ]** marks speech the speech-to-text left out (usually an "um").
 - **Jump cuts:** *punch-in zoom* zooms in a little on every other piece so cuts look like a camera change;
   *hard cut* just joins them.
 
-**Playing** - click a word to hear it; **▶ Play the edit** (or Space) plays the moment skipping the cuts.
+**Playing** - click a word to hear it; **▶ Play** (or Space) plays the moment skipping the cuts.
 The word being heard is highlighted and the text follows the timeline.
 """),
     ("🖼", "Pictures", """
