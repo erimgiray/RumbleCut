@@ -477,12 +477,23 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self.tabs.addTab(self._build_get_tab(), _num_icon(1), "Get video")
         self.tabs.addTab(self._build_studio_tab(), _num_icon(2), "Clip studio")
-        self.tabs.addTab(self._build_export_tab(), _num_icon(3), "Export")
+        # ③ Export & publish: save the clips as files, or post them straight online - one page, two tabs
+        from .publish_tab import PublishTab
+        self.out_tabs = QTabWidget()
+        self.out_tabs.setObjectName("lefttabs")
+        self.out_tabs.setDocumentMode(True)
+        self.out_tabs.addTab(self._build_export_tab(), "💾  Save as files")
+        self.pub_tab = PublishTab(self)
+        self.out_tabs.addTab(self.pub_tab, "🚀  Post online")
+        self.out_tabs.currentChanged.connect(lambda i: self.pub_tab.refresh() if i == 1 else self._fill_export_rows())
+        _ow = QWidget()
+        _ol = QVBoxLayout(_ow)
+        _ol.setContentsMargins(16, 8, 16, 0)
+        _ol.addWidget(self.out_tabs)
+        self.export_index = self.tabs.addTab(_ow, _num_icon(3), "Export && publish")
+        self.pub_index = self.export_index
         self.tabs.setIconSize(QSize(26, 26))
         self.ctx_index = self.tabs.addTab(self._build_context_tab(), _glyph_icon("🎬"), "Edit clips")
-        from .publish_tab import PublishTab
-        self.pub_tab = PublishTab(self)
-        self.pub_index = self.tabs.addTab(self.pub_tab, _glyph_icon("🚀"), "Publish")
         _sc = QScrollArea()
         self._settings_scroll = _sc
         _sc.setWidgetResizable(True)
@@ -491,8 +502,11 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and (
             self.script_tab if self.edit_tabs.currentIndex() == 0 else self.ctx_tab).refresh())
-        self.tabs.currentChanged.connect(lambda i: i == self.pub_index and self.pub_tab.refresh())
-        self.tabs.currentChanged.connect(lambda i: self.tabs.tabText(i).strip().endswith("Export") and self._fill_export_rows())
+        # leaving a page stops what it was playing, so two players never talk over each other
+        self.tabs.currentChanged.connect(lambda i: self.script_tab.pause() if i != self.ctx_index
+                                         else self.pause_studio())
+        self.tabs.currentChanged.connect(lambda i: i == self.export_index and (
+            self.pub_tab.refresh() if self.out_tabs.currentIndex() == 1 else self._fill_export_rows()))
         self._build_menu()
         self._update_no_video("")
         from PySide6.QtWidgets import QAbstractSpinBox
@@ -1303,6 +1317,7 @@ class MainWindow(QMainWindow):
             self.player.setVideoOutput(self.video)
             self.player.positionChanged.connect(self._pos_changed)
             self.player.playbackStateChanged.connect(lambda _: self._pos_changed(self.player.position()))
+            self.player.playbackStateChanged.connect(self._studio_state)
             self.video_stack = QStackedWidget()
             self.video_stack.addWidget(self.video)
         else:
@@ -2312,7 +2327,7 @@ class MainWindow(QMainWindow):
         st = getattr(self, "script_tab", None)
         if st is not None and st.isVisible():
             st.refresh()
-        if self.tabs.tabText(self.tabs.currentIndex()).strip().endswith("Export"):
+        if self.tabs.currentIndex() == self.export_index:
             self._fill_export_rows()
 
     def _set_hidden(self, c, on: bool):
@@ -2695,6 +2710,22 @@ class MainWindow(QMainWindow):
             self._load_media(c.source, c.offset)
             self.player.setPosition(int(t * 1000))
 
+    def _studio_state(self, state):
+        playing = state == QMediaPlayer.PlayingState
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause if playing else QStyle.SP_MediaPlay))
+        if playing and hasattr(self, "script_tab"):
+            self.script_tab.pause()             # only one player at a time
+
+    def show_publish(self):
+        """Go to Export & publish → Post online."""
+        self.tabs.setCurrentIndex(self.export_index)
+        self.out_tabs.setCurrentIndex(1)
+
+    def pause_studio(self):
+        if self.player and self.player.playbackState() == QMediaPlayer.PlayingState:
+            self._clip_stop_at = None
+            self.player.pause()
+
     def skip_to_edge(self, edge: str):
         """⏮ / ⏭: put the playhead on the start or end of the selected moment. If the moment is playing,
         ⏮ replays it from the top; ⏭ goes to its last moment and stops there."""
@@ -2891,9 +2922,6 @@ class MainWindow(QMainWindow):
 
         # ---- left: every clip with its own options
         left = QVBoxLayout()
-        title = QLabel("Export")
-        title.setObjectName("h1")
-        left.addWidget(title)
         hrow = QHBoxLayout()
         hl = QLabel("Each clip can have its own name, shape and quality - “Same as all” uses the defaults on "
                     "the right. Export one with 💾, or tick several and export them together.")
@@ -3363,6 +3391,8 @@ class MainWindow(QMainWindow):
                 "times": [round(float(x), 2) for x in r.times],
                 "score": [round(float(x), 3) for x in r.score],
                 "candidates": [asdict(h) for h in self.candidates],
+                "transcript": [[round(float(a), 2), round(float(b), 2), str(t)]
+                               for a, b, t in (getattr(r, "transcript", None) or []) if str(t).strip()],
                 "shown": int(getattr(self, "_shown_total", 0))}
 
     def _autosave(self):
@@ -3417,7 +3447,8 @@ class MainWindow(QMainWindow):
                     pass
             self.result = analysis.AnalysisResult(
                 duration=float(an.get("duration") or 0), times=np.asarray(an["times"], dtype=float),
-                score=np.asarray(an["score"], dtype=float), loudness=np.zeros(0), scene_times=[], highlights=hs)
+                score=np.asarray(an["score"], dtype=float), loudness=np.zeros(0), scene_times=[], highlights=hs,
+                transcript=[tuple(x) for x in an.get("transcript", [])])
             self.candidates = hs
             self._shown_total = int(an.get("shown", 0))
             self.timeline.set_data(self.result.duration or (self.info.duration if self.info else 0),

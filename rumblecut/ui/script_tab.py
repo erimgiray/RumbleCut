@@ -159,6 +159,7 @@ class ScriptPanel(QWidget):
         self.overview.clip_moved.connect(self._overview_moved)
         self.overview.clip_move_done.connect(lambda i, a, b, w: self._span_done())
         self.overview.add_at.connect(self._add_at)
+        self.overview.seek.connect(self.seek_stream)
         v.addWidget(self.overview)
         self.clip_tl_title = QLabel("")
         self.clip_tl_title.setObjectName("muted")
@@ -288,6 +289,7 @@ class ScriptPanel(QWidget):
                 self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video)
             self.player.positionChanged.connect(self._pos)
+            self.player.playbackStateChanged.connect(self._state_changed)
             self.stack.addWidget(self.video)
         else:
             self.player = None
@@ -331,6 +333,7 @@ class ScriptPanel(QWidget):
         return next((c for c in self.project.clips if id(c) == cid), None)
 
     def refresh(self):
+        self._auto_write()
         keep = self.moment.currentData()
         self.moment.blockSignals(True)
         self.moment.clear()
@@ -438,17 +441,41 @@ class ScriptPanel(QWidget):
         return min(1.0, sum(b - a for a, b in self.project.script_done) / dur)
 
     def _script_words(self) -> list:
-        """Every word known, in project time - the whole-stream script, or (older projects) the moments' own."""
+        """Every word known, in project time: the written-out script (or, in older projects, the moments' own
+        words), plus - for stretches not written out yet - the rougher transcript from the scan, marked as a
+        draft ([a, b, word, True]) and shown greyed."""
+        key = (id(self.project.script), len(self.project.script), len(self.project.script_done), len(self.project.clips),
+               id(getattr(self.win.result, "transcript", None)) if getattr(self.win, "result", None) else 0,
+               tuple((round(c.start, 2), len(c.words)) for c in self.project.clips) if not self.project.script else ())
+        if getattr(self, "_sw_key", None) == key:
+            return self._sw
         if self.project.script:
-            return self.project.script
-        seen, ws = set(), []
-        for c in self.project.clips:
-            for a, b, w in c.words:
-                k = (round(a + c.offset, 2), w)
-                if k not in seen:
-                    seen.add(k)
-                    ws.append([a + c.offset, b + c.offset, w])
+            ws = list(self.project.script)
+        else:
+            seen, ws = set(), []
+            for c in self.project.clips:
+                for a, b, w in c.words:
+                    k = (round(a + c.offset, 2), w)
+                    if k not in seen:
+                        seen.add(k)
+                        ws.append([a + c.offset, b + c.offset, w])
+        covered = self._covered()
+        r = getattr(self.win, "result", None)
+        for a, b, text in (getattr(r, "transcript", None) or []):
+            a, b = float(a), float(b)
+            if any(x <= a + 0.5 and y >= b - 0.5 for x, y in covered):
+                continue
+            parts = str(text).split()
+            if not parts:
+                continue
+            total = sum(len(p) + 1 for p in parts)
+            t = a
+            for p_ in parts:
+                d = (b - a) * (len(p_) + 1) / total
+                ws.append([round(t, 3), round(t + d * 0.9, 3), p_, True])
+                t += d
         ws.sort(key=lambda x: x[0])
+        self._sw_key, self._sw = key, ws
         return ws
 
     def _sync_words(self, c):
@@ -605,7 +632,12 @@ class ScriptPanel(QWidget):
             put_marks(ce)
             first = False
 
-        for a, b, w in ws:
+        draft_f = QTextCharFormat(base)
+        draft_f.setForeground(QBrush(QColor("#8b93a1")))
+        draft_f.setToolTip("From the scan - rough timing. 📝 Get the script writes this part out word by word.")
+        for wd in ws:
+            a, b, w = wd[0], wd[1], wd[2]
+            draft = len(wd) > 3
             if c is not None and not done_current and (a >= cs - 0.01 or b > cs):
                 if prev is not None and cs - prev[1] > 1.2:
                     put_marks(cs, inclusive=False)
@@ -631,7 +663,7 @@ class ScriptPanel(QWidget):
                     put_marks(a, inclusive=False)
                     new_par(a)
             put_marks(a)
-            fmt = QTextCharFormat(base)
+            fmt = QTextCharFormat(draft_f if draft else base)
             tb = word_tint(a)
             if tb is not None:
                 fmt.setBackground(tb)
@@ -826,14 +858,17 @@ class ScriptPanel(QWidget):
             self.win._clip_edited(c)
 
     # ------------------------------------------------------------------ background jobs
-    def _run(self, job, done, label):
+    def _run(self, job, done, label, quiet: bool = False):
         w = Worker(job)
         self._worker = w
         self.progress.setValue(0)
         self.status.setText(label)
         w.progress.connect(lambda f, m: (self.progress.setValue(int(max(f, 0) * 1000)), self.status.setText(m)))
         w.done.connect(done)
-        w.failed.connect(lambda m: (self.status.setText("⚠ " + m), QMessageBox.warning(self, "Script", m)))
+        if quiet:            # started by itself: a problem goes in the status line, not a pop-up
+            w.failed.connect(lambda m: self.status.setText("⚠ Couldn't write out the stream: " + m[:200]))
+        else:
+            w.failed.connect(lambda m: (self.status.setText("⚠ " + m), QMessageBox.warning(self, "Script", m)))
         w.cancelled.connect(lambda: self.status.setText("Cancelled"))
 
         def finished():
@@ -843,14 +878,30 @@ class ScriptPanel(QWidget):
         self._update_buttons()
         self.win._start(w)
 
-    def load_script(self):
+    def _auto_write(self):
+        """Start writing out the whole stream in the background as soon as this page is opened, so the words
+        before and after every moment are there to move its start and end."""
+        from .. import config
+        if not config.load_settings().get("auto_script", True):
+            return
+        if (self._worker is not None and self._worker.isRunning()) or getattr(self, "_auto_stopped", False):
+            return
+        info = getattr(self.win, "info", None)
+        if not (self.project.source and info and info.duration and transcribe.available()):
+            return
+        if self._written_fraction() < 0.995:
+            QTimer.singleShot(0, lambda: self.load_script(auto=True))
+
+    def load_script(self, auto: bool = False):
         """📝 Write out the whole stream - the moments first, then everything before and after them.
         Stretches arrive as they're done; it can be stopped and carried on later."""
         if self._worker is not None and self._worker.isRunning():
             if getattr(self, "_writing", False):
                 self._worker.cancel()
+                self._auto_stopped = True
                 self.status.setText("Stopping after this stretch…")
             return
+        self._auto_stopped = False
         src = self.project.source
         info = getattr(self.win, "info", None)
         if not src or not info or not info.duration:
@@ -879,21 +930,28 @@ class ScriptPanel(QWidget):
                 out.append((pos, b))
             return out
         pieces = []
-        for a, b in [(0.0, dur)]:
-            for x, y in todo(a, b):
-                t = x
-                while t < y - 0.5:
-                    pieces.append((t, min(y, t + 120.0)))
-                    t += 120.0
+        cur0 = self.current_clip()
+        anchor = ((cur0.start + cur0.end) / 2 + cur0.offset - 60.0) % 120.0 if cur0 else 0.0
+        for x, y in todo(0.0, dur):
+            # 120 s pieces on a grid lined up with the selected moment, so it's written out first in one go
+            t = x
+            nxt = x + ((anchor - x) % 120.0 or 120.0)
+            while t < y - 0.5:
+                e = min(y, nxt)
+                if e - t > 0.5:
+                    pieces.append((t, e))
+                t, nxt = e, e + 120.0
         cur = self.current_clip()
         focus = [x for x in self.project.clips if x.source == src or True]
         focus.sort(key=lambda x: (x is not cur, x.start + x.offset))
 
         def prio(p):
+            # the moment itself first, then outwards from it (plenty either side), then the rest in order
             for n, x in enumerate(focus):
-                a, b = x.start + x.offset - 90, x.end + x.offset + 90
+                a, b = x.start + x.offset - 240, x.end + x.offset + 240
                 if p[1] > a and p[0] < b:
-                    return (0, n, p[0])
+                    mid = (x.start + x.end) / 2 + x.offset
+                    return (0, n, abs((p[0] + p[1]) / 2 - mid))
             return (1, 0, p[0])
         pieces.sort(key=prio)
         total = sum(b - a for a, b in pieces) or 1.0
@@ -925,11 +983,13 @@ class ScriptPanel(QWidget):
             self.status.setText("📝 The whole stream is already written out")
             self._writing = False
             return
-        self._run(job, finished_ok, "📝 Writing out the stream - the moments first…")
+        self._run(job, finished_ok, "📝 Writing out the stream - the moments first…", quiet=auto)
+        if auto:
+            self._worker.failed.connect(lambda m: setattr(self, "_auto_stopped", True))   # don't keep retrying
         self._worker.finished.connect(lambda: (setattr(self, "_writing", False), self._drain.stop(),
                                                self._drain_script(), self._update_buttons()))
-        self._worker.cancelled.connect(lambda: self.status.setText(
-            f"Stopped - {self._written_fraction() * 100:.0f}% written out. Press the button to carry on."))
+        self._worker.cancelled.connect(lambda: (self._drain_script(), self.status.setText(
+            f"Stopped - {self._written_fraction() * 100:.0f}% written out. Press the button to carry on.")))
         self._drain.start(1500)
         self._update_buttons()
 
@@ -1189,17 +1249,37 @@ class ScriptPanel(QWidget):
         self._worker.finished.connect(lambda: self.progress.setRange(0, 1000))
 
     # ------------------------------------------------------------------ live preview that skips cuts
+    def _playing(self) -> bool:
+        return bool(self.player) and self.player.playbackState() == QMediaPlayer.PlayingState
+
+    def _state_changed(self, state):
+        playing = state == QMediaPlayer.PlayingState
+        self.btn_play.setText("■ Stop" if playing else "▶ Play the edit")
+        if playing:
+            self.win.pause_studio()             # only one player at a time
+        else:
+            self.clip_tl.set_playing(False)
+            self.overview.set_playing(-1)
+
+    def pause(self):
+        """Stop playing (keeps the position) - e.g. when the Clip studio starts playing."""
+        if self._playing():
+            self._stop()
+
     def play_toggle(self):
         if not self.player:
             return
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self._playing():
             self._stop()
             return
         c = self.current_clip()
         if not c:
             return
-        start = c.kept[0][0]
-        self._play_from(start)
+        # carry on from where the cursor is if it's inside the moment, otherwise from the start
+        t = self.player.position() / 1000
+        here = (not self._preview and self.player.source() == QUrl.fromLocalFile(c.source)
+                and c.start <= t < c.end - 0.3)
+        self._play_from(t if here else c.kept[0][0])
 
     def _play_from(self, t: float):
         c = self.current_clip()
@@ -1223,7 +1303,6 @@ class ScriptPanel(QWidget):
         self._stop_at = None
         self._free_play = False
         self.btn_play.setText("▶ Play the edit")
-        self.view.setExtraSelections([])
         self.clip_tl.set_playing(False)
         self.overview.set_playing(-1)
 
@@ -1279,21 +1358,26 @@ class ScriptPanel(QWidget):
         if self._preview and c:
             self.pos_label.setText(f"👁 with effects  {fmt_time(ms / 1000)} / {fmt_time(c.out_length)}")
             return
-        if self._free_play:
-            t = ms / 1000
-            self.pos_label.setText(f"{fmt_time(self.project.to_stream(t))}  (the stream)")
-            self.overview.set_playhead(t)
-            self._highlight_time(t)
-            return
-        if not c or self._stop_at is None:
-            return
         t = ms / 1000
+        on_clip = c is not None and self.player.source() == QUrl.fromLocalFile(c.source)
+        tp = t + (c.offset if on_clip else 0.0)                 # where that is on the stream
+        if self._free_play or self._stop_at is None:              # playing the stream, or just moved there
+            self.pos_label.setText(f"{fmt_time(self.project.to_stream(tp))}" +
+                                   ("  (the stream)" if self._free_play else ""))
+            self.overview.set_playhead(tp)
+            if c is not None:
+                self.clip_tl.set_playhead(tp)
+            self._highlight_time(tp)
+            return
+        if not c:
+            return
         for a, b in c.cuts:
             if a <= t < b - 0.02:
                 self.player.setPosition(int(b * 1000))       # skip what's been cut
                 return
         if t >= self._stop_at:
             self._stop()
+            self._highlight_time(tp)
             return
         out = c.to_out(t)
         self.pos_label.setText(f"{fmt_time(out)} / {fmt_time(c.out_length)}")
@@ -1389,17 +1473,29 @@ class ScriptPanel(QWidget):
             self.status.setText("")
 
     def _tl_seek(self, t: float):
+        """A click on either timeline (stream time): the script and the player follow."""
+        self.seek_stream(t)
+
+    def seek_stream(self, t: float):
         c = self.current_clip()
-        if not (c and self.player):
+        if not self.player or not self.project.source:
             return
-        ft = t - c.offset
-        if c.start <= ft < c.end - 0.1:
-            self._play_from(ft)
+        was = self._playing()
+        if was:
+            self._play_free(t)              # plays the edit when inside the moment, the stream outside it
+            return
+        self._stop()
+        self._preview = False
+        if c is not None and c.start + c.offset <= t <= c.end + c.offset:
+            src, ft = c.source, t - c.offset
         else:
-            self._stop()
-            self._restore_source()
-            self.player.setPosition(int(ft * 1000))
-            self.clip_tl.set_playhead(t)
+            src, ft = self.project.source, t
+        if self.player.source() != QUrl.fromLocalFile(src):
+            self.player.setSource(QUrl.fromLocalFile(src))
+        self.player.setPosition(int(max(0.0, ft) * 1000))
+        self.overview.set_playhead(t)
+        self.clip_tl.set_playhead(t)
+        self._highlight_time(t)
 
     def _add_at(self, t: float):
         self.win.add_clip_at(t)

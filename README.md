@@ -96,7 +96,7 @@ The **Only download part of the video** box and its times are remembered between
   - **images on screen**, timed to the clip, with fades and a border
 - **Preview with effects** renders a quick low-res version so you can check the look before exporting.
 
-**③ Export**
+**③ Export & publish** (two tabs: 💾 Save as files, and 🚀 Post online)
 - **Every clip has its own row:** a thumbnail, a file name you can change, and its own **shape** and **quality** (or *Same as all*, the defaults on the right). **💾 Export** saves just that clip; **✏** opens it in the Clip studio. Tick the ones you want and **Export ticked clips** does them together, as separate videos and/or one compilation.
 - **Shapes:** Original, 16:9, **9:16 vertical** (crop or blurred background), and 1:1.
 - **Settings:** 480p to 4K, 24 to 60 fps, quality, and an optional watermark such as `@yourchannel`.
@@ -183,12 +183,12 @@ rumblecut/
 tests/test_engine.py        end-to-end check on a synthetic stream:  python -m tests.test_engine
 ```
 
-## 🚀 Publish
+## 🚀 Publish (③ Export & publish → Post online)
 
 Post moments to **YouTube, Instagram, TikTok and X** straight from RumbleCut.
 
 1. **Set up each platform once** in *Settings → Publishing accounts*: press **Setup steps** for that platform, create your own free developer app (the steps link straight to the right page), paste its keys, and press **Connect** to sign in in your browser. The redirect / callback address to give each platform is shown there: `http://localhost:47123/callback/`. Logins are stored encrypted for your Windows account and refresh themselves.
-2. In the **🚀 Publish** tab, pick a moment and tick the platforms. **✨ Write titles, captions & hashtags with AI** (or **Write posts for all ticked**) drafts a post per platform from what's said in the clip; edit anything.
+2. In **③ Export & publish → 🚀 Post online**, pick a moment and tick the platforms. **✨ Write titles, captions & hashtags with AI** (or **Write posts for all ticked**) drafts a post per platform from what's said in the clip; edit anything.
 3. **Shape:** TikTok, Instagram and YouTube clips up to 3 minutes default to **vertical 9:16** (a Short / Reel); X and longer YouTube videos keep the original shape. Change it per platform. Effects and approved pictures are included.
 4. **🚀 Post this moment** or **Post all ticked moments**, now or **scheduled**: YouTube schedules the video itself; the others are posted by a Windows scheduled task at that time (RumbleCut can be closed, the PC must be on). Results and links appear under *Posted and scheduled* (double-click to open; select a scheduled one to cancel it).
 
@@ -203,8 +203,8 @@ Post moments to **YouTube, Instagram, TikTok and X** straight from RumbleCut.
 
 Trim a clip by editing its transcript, like a document: delete words in the text and they're cut from the video.
 
-1. In **🎬 Edit clips → ✂ Script** press **📝 Get the script**. The **whole stream** is written out, every word with its own timing: the moments first, then everything before and after them, filling in as it goes (with a time at the start of each paragraph). You can **■ Stop writing** and carry on later (the button shows how much is done); it's saved with your session. Each moment is marked **⟦3 … 3⟧** in the text and tinted in its colour; the one you've picked is brighter and editable. Gaps inside it show as **⏸ pauses** (blue) or **[… ]** (purple) where someone spoke but the speech-to-text left it out; that's usually an "um".
-   - **Move a moment's start or end with the words:** right-click any word, before, inside or after the moment, and choose **⟦ Start it at "word"**, **End it after "word" ⟧**, or **start/end it where this sentence starts/ends** (by its punctuation). Or click a word and press **⟦ Start here** / **End here ⟧**, or select some words and press **⟦ Selection ⟧**. The right-click menu can also make a **＋ New moment from this sentence** (or from the selected words), go to another moment, or play from there. Click any word to hear it; **⌖ Go to the moment** scrolls back to it.
+1. Open **🎬 Edit clips → ✂ Script**. Straight away it shows the whole stream's text: the rough transcript from the scan (grey) where nothing better is ready yet. It also starts writing out the **whole stream** word by word in the background (or press **📝 Get the script**), every word with its own timing: the moments first, then everything before and after them, filling in as it goes (with a time at the start of each paragraph). You can **■ Stop writing** and carry on later (the button shows how much is done); it's saved with your session. Each moment is marked **⟦3 … 3⟧** in the text and tinted in its colour; the one you've picked is brighter and editable. Gaps inside it show as **⏸ pauses** (blue) or **[… ]** (purple) where someone spoke but the speech-to-text left it out; that's usually an "um".
+   - **Move a moment's start or end with the words:** right-click any word, before, inside or after the moment, and choose **⟦ Start it at "word"**, **End it after "word" ⟧**, or **start/end it where this sentence starts/ends** (by its punctuation). Or click a word and press **⟦ Start here** / **End here ⟧**, or select some words and press **⟦ Selection ⟧**. The right-click menu can also make a **＋ New moment from this sentence** (or from the selected words), go to another moment, or play from there. Click any word to hear it; **⌖ Go to the moment** scrolls back to it. Clicking either timeline above moves the cursor in the text too, and the word being played is highlighted as it plays. Only one player plays at a time: starting one pauses the other, and leaving a page stops what it was playing.
 2. **Select words and press Delete** to cut them; **Enter** brings them back; double-click a word to toggle it. **Ctrl+Z / Ctrl+Shift+Z** undo and redo (here they step through your cuts first).
 3. Let RumbleCut suggest cuts (amber, struck through), then **✓ Accept** or **✖ Keep** each one, or all at once:
    - **🧹 Quick clean-up** (no AI): "um"/"uh", stutters and repeated words ("I I think"), pauses longer than 0.6 s (shortened to 0.25 s), and unscripted bits.

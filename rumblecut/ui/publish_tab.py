@@ -220,9 +220,6 @@ class PublishTab(QWidget):
         # ---- moments
         left = QVBoxLayout()
         left.setSpacing(10)
-        h = QLabel("🚀  Publish")
-        h.setObjectName("h2")
-        left.addWidget(h)
         ml = QLabel("Moments")
         ml.setObjectName("muted")
         left.addWidget(ml)
