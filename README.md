@@ -53,11 +53,11 @@ The **Only download part of the video** box and its times are remembered between
 
 **② Clip studio**
 - **How moments are judged** (the **Judge by** box):
-  - **Voice & energy only** (fast): pitch compared with the speaker's normal (upbeat = higher), how animated the voice is, talking pace, laughter, and loudness as a minor signal.
+  - **Voice & energy only** (fast, no words): pitch compared with the speaker's normal (upbeat = higher), how animated the voice is, talking pace, laughter, and loudness as a minor signal.
   - **AI reads lively parts + samples** (recommended):
     - **What gets read:** the ~20 liveliest stretches *and* a passage every few minutes across the whole stream are transcribed on your PC. Calm-but-great moments get read too.
     - **How it's rated:** your AI model (Settings → AI models) rates each passage as funny, hot take, shocking, heated, emotional, quotable or story payoff.
-    - **How it ranks:** its rating **leads the ranking**, and voice energy is only a tie-breaker. An AI pick's clip is timed to the exact passage the AI chose.
+    - **How it ranks:** **only what's said qualifies a moment**: a passage your AI rated, or a section it rated interesting. A stretch that just sounds lively (higher pitch, faster talking, louder) is never picked on that alone; voice only breaks ties between passages that are already good. The reasons and **Why** describe what's said, not the voice. If fewer moments stand out than you asked for, you get fewer. An AI pick's clip is timed to the exact passage the AI chose.
   - **AI reads everything** (slowest): the whole stream is read, so nothing is missed.
 - **🧠 Look for:** tell the AI what you want, e.g. "funny moments", "political hot takes", "anything about Amy Acton". Then press **↻ Ask AI again** to re-rank. It reuses the transcript from the last scan, so it's much faster than a new scan.
 - **AI log** (the tab next to Moments) shows live what the AI is reading and what it finds, with the quote and the reason. Use Copy log to keep it.

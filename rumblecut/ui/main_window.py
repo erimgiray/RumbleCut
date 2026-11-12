@@ -1028,8 +1028,8 @@ class MainWindow(QMainWindow):
             "talking pace, laughter, and loudness.<br>"
             "<b>AI reads lively parts + samples:</b> the ~20 liveliest stretches <i>and</i> a passage every few "
             "minutes across the whole stream are transcribed on your PC; your AI model (Settings → AI models) "
-            "rates them - funny, hot take, shocking, heated, quotable… - and <b>its rating leads the ranking</b>, "
-            "with voice energy as a tie-breaker.<br>"
+            "rates them - funny, hot take, shocking, heated, quotable… - and <b>only what's said qualifies a "
+            "moment</b>: pitch, pace and loudness never pick one, they just break ties.<br>"
             "<b>AI reads everything:</b> the whole stream is read - slowest, misses nothing.<br>"
             "Use <b>Look for</b> to tell the AI what you want. Without an AI model, a built-in word list is used.")
         if not transcribe.available():

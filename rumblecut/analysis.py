@@ -346,8 +346,9 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             # the claim, the start of the story)
             raw = [(max(0.0, i * HOP - 75), min(dur, i * HOP + 40)) for i in peaks]
             # ...plus an even sample across the whole stream, so calm parts get read too
-            every = 300.0 if dur > 1800 else max(60.0, dur / 6)
-            raw += [(t, min(dur, t + 90.0)) for t in np.arange(every / 2, dur, every)]
+            # (denser than before: what's said decides, so more of the stream gets read)
+            every = 240.0 if dur > 1800 else max(60.0, dur / 8)
+            raw += [(t, min(dur, t + 100.0)) for t in np.arange(every / 2, dur, every)]
             windows = []
             for a, b in sorted(raw):
                 if windows and a <= windows[-1][1]:
@@ -447,16 +448,16 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
         a, b = int(sc.start / HOP), min(n, int(sc.end / HOP) + 1)
         for j in range(a, b):
             sec_at[j] = sc
-    if has_ai or sections:
-        # content leads: the AI's rating decides, voice/energy break ties (and still surface
-        # passages the AI didn't read)
-        score = 2.4 * words_curve + 0.3 * base
-        if sections:
-            read = sec_interest >= 0
-            score = score + np.where(read, 0.9 * np.clip(sec_interest - 0.5, 0, None), 0.0)
-            score = score * np.where(read, 0.3 + 0.7 * np.clip(sec_interest, 0, 1), 0.85)
-    elif has_words:
-        score = base + 1.2 * words_curve
+    # What qualifies as a moment is WHAT IS SAID whenever the words are known: a passage your AI
+    # (or, without one, the built-in word list) rated, or a section the AI rated interesting.
+    # Pitch, pace and loudness never make a moment on their own - they only break ties between
+    # passages that are already good for what's said.
+    content_led = has_words or bool(sections)
+    eligible = None
+    if content_led:
+        sec_part = np.where(sec_interest >= 0, 1.2 * np.clip(sec_interest - 0.55, 0, None), 0.0)
+        score = 2.4 * words_curve + sec_part + 0.08 * base * (words_curve > 0)
+        eligible = (words_curve > 0) | (sec_part > 0)
     else:
         score = base
     score = _smooth(score, 2.0)
@@ -483,6 +484,8 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             break
         if taken[i]:
             continue
+        if eligible is not None and not eligible[i]:
+            continue     # nothing worth hearing was said here, however lively it sounds
         if dur > 2 * L and (i < edge // 2):
             continue  # skip the stream's opening seconds (intros / "can you hear me")
         picks.append(int(i))
@@ -513,6 +516,14 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
             timing = [f"Your AI marked {show(ev_start)} – {show(ev_end)} as the moment itself."]
             if getattr(ai_sp, "context_start", None) is not None and ai_sp.context_start < ev_start - 0.5:
                 ctx = float(ai_sp.context_start)
+        elif ai_sp is not None:              # the built-in word list found it
+            ev_start, ev_end = float(ai_sp.start), max(float(ai_sp.end), float(ai_sp.start) + 3)
+            timing = [f"What's said at {show(ev_start)} – {show(ev_end)} is the moment itself."]
+        elif content_led:                    # an interesting section with no single standout line
+            sec = sec_at.get(i)
+            if sec is not None:
+                ev_start, ev_end = max(ev_start, float(sec.start)), min(ev_end, float(sec.end))
+            timing = [f"The most interesting stretch of this section is {show(ev_start)} – {show(ev_end)}."]
         else:
             timing = [f"The excitement peaks at {show(peak)}."]
             if ev_end - ev_start >= 2:
@@ -630,35 +641,35 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                 reasons.append(sp.label)
                 why.append(f"What's said - {sp.why}" + (f" “{sp.quote[:80]}”" if sp.quote else ""))
                 kind = "Laughter" if sp.label == "Laughter" else kind
-        pu = float(np.max(pitch_up[win]))
+        pu = float(np.max(pitch_up[win])) if not content_led else 0.0
         if pu >= 2.0:
             reasons.append(f"Voice up {pu:.0f} semitones")
             why.append(f"Upbeat voice: pitch about {pu:.0f} semitones above their normal - sounds excited.")
             if kind == "Moment":
                 kind = "Excited"
-        if float(np.max(animated[win])) > 0.8:
+        if not content_led and float(np.max(animated[win])) > 0.8:
             reasons.append("Animated delivery")
             why.append(f"Animated: the voice swings in pitch {1 + float(np.max(animated[win])):.1f}× more than usual.")
             if kind == "Moment":
                 kind = "Animated"
-        if float(np.max(pace[win])) > 0.4:
+        if not content_led and float(np.max(pace[win])) > 0.4:
             why.append(f"Talking fast: about {100 * float(np.max(pace[win])):.0f}% quicker than their normal pace.")
             reasons.append("Fast talking")
-        if float(np.max(laugh[win])) > 0.3:
+        if not content_led and float(np.max(laugh[win])) > 0.3:
             reasons.append("Laughter")
             why.append("Sounds like laughter: rapid, regular 'ha-ha' bursts with a raised voice.")
             if kind in ("Moment", "Excited", "Animated"):
                 kind = "Laughter"
-        if excite[i] > 1.5 or dev[i] > 4:
+        if not content_led and (excite[i] > 1.5 or dev[i] > 4):
             reasons.append(f"Louder (+{max(dev[i], 0):.0f} dB)")
             why.append(f"Louder: {max(dev[i], 0):.0f} dB above the typical level of the 2 minutes around it.")
             if kind == "Moment":
                 kind = "Loud moment"
-        if rise[i] > 6:
+        if not content_led and rise[i] > 6:
             why.append(f"Sudden reaction: the volume jumped by about {rise[i]:.0f} dB within a few seconds.")
             if kind in ("Moment", "Loud moment"):
                 kind = "Reaction"
-        if scene_t and scene_density[i] > np.percentile(scene_density, 90):
+        if not content_led and scene_t and scene_density[i] > np.percentile(scene_density, 90):
             cuts = int(np.sum(np.abs(np.asarray(scene_t) - peak) < 6))
             reasons.append("Lots of on-screen action")
             why.append(f"Busy on screen: {cuts} visual cuts or big changes within 6 s of the peak.")
@@ -666,13 +677,19 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                 kind = "Action"
         sc = sec_at.get(i)
         if sc is not None:
-            why.insert(0, f"Part of: {sc.summary} (section rated {sc.interest * 10:.0f}/10 by your AI)")
+            # what's said leads the explanation; the section it sits in comes next
+            why.insert(1 if (sp is not None and why) else 0,
+                       f"Part of: {sc.summary} (section rated {sc.interest * 10:.0f}/10 by your AI)")
             if not reasons:
                 reasons.append(f"Section: {sc.summary}"[:70])
                 kind = "Section"
         if not reasons:
-            reasons.append("Above-average energy")
-            why.append("No single standout signal, but voice and energy here are livelier than most of the stream.")
+            if content_led:
+                reasons.append("What's said here")
+                why.append("Part of a stretch your AI rated as worth hearing.")
+            else:
+                reasons.append("Above-average energy")
+                why.append("No single standout signal, but voice and energy here are livelier than most of the stream.")
         top = max(1, int(round(100.0 * float(np.mean(score > score[i])))) or 1)
         why.append(f"Overall score {score[i] * 100:.0f}/100: in the top {top}% of the whole stream.")
         # skip near-duplicates: mostly the same stretch as a better moment already found
@@ -689,11 +706,15 @@ def find_highlights(src: str, num_clips: int = 10, clip_length: float = 30.0,
                                     why=why, timing=timing, kind=kind))
 
     highlights.sort(key=lambda h: -h.score)
+    if content_led and len(highlights) < num_clips:
+        log(f"Only {len(highlights)} moment{'s' if len(highlights) != 1 else ''} stood out for what's said "
+            "(lively-sounding stretches with nothing worth hearing are left out).")
     if on_progress:
         on_progress(1.0, f"Found {len(highlights)} highlights")
     res = AnalysisResult(duration=dur, times=times, score=score, loudness=loud,
                          scene_times=scene_t, highlights=highlights, transcript=transcript or [])
     res.word_note = word_note
+    res.content_led = content_led
     res.sections = sorted(sections, key=lambda x: x.start)
     res.blocks = blocks if words_on else None
     res.voice = vf
