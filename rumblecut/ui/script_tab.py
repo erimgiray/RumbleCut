@@ -741,16 +741,24 @@ class ScriptPanel(QWidget):
                 mt, _, kind, i = marks[mi]
                 mi += 1
                 x = clips[i]
+                if x is not c:
+                    # only the selected moment gets start/end points; the others just show as a tint
+                    (open_.add if kind == "start" else open_.discard)(i)
+                    continue
                 f = QTextCharFormat()
                 col = QColor(_origin_colour(x.origin))
-                if x.hidden:
-                    col = QColor("#9ca3af")
+                if x.hidden or not x.enabled:
+                    col = QColor("#9ca3af")          # hidden or deselected (won't be exported): grey
                 f.setForeground(QBrush(col))
                 f.setFontWeight(QFont.Black if x is c else QFont.Bold)
                 if x is c:
                     f.setFontPointSize(v.font().pointSizeF() * 1.15)
                 tag = "?" if x.hidden else str(i + 1)
-                f.setToolTip(f"{i + 1}. {x.title} - drag to move where it {'starts' if kind == 'start' else 'ends'}")
+                f.setToolTip(f"{i + 1}. {x.title}" + ("  (deselected - not exported)" if not x.enabled else "")
+                             + f" - drag to move where it {'starts' if kind == 'start' else 'ends'}")
+                if not x.enabled:
+                    f.setFontStrikeOut(False)
+                    f.setFontItalic(False)
                 chip = QColor(col)
                 chip.setAlpha(70 if x is c else 40)
                 f.setBackground(QBrush(chip))        # a small chip you can grab
@@ -774,6 +782,10 @@ class ScriptPanel(QWidget):
             for i in sorted(open_):
                 x = clips[i]
                 if x is not c and not x.hidden:
+                    if not x.enabled:                     # deselected moments: a grey tint
+                        g = QColor("#9ca3af")
+                        g.setAlpha(28)
+                        return QBrush(g)
                     return tint(x.origin, 45)
             return None
 
@@ -825,7 +837,12 @@ class ScriptPanel(QWidget):
                     fmt.setFontStrikeOut(True)
                     fmt.setToolTip(se.KIND_NAMES.get(sg["kind"], sg["kind"]) + (f" - {sg['why']}" if sg.get("why") else ""))
                 else:
-                    fmt.setBackground(tint(c.origin, 70))
+                    if c.enabled:
+                        fmt.setBackground(tint(c.origin, 70))
+                    else:
+                        g = QColor("#9ca3af")
+                        g.setAlpha(55)
+                        fmt.setBackground(QBrush(g))
                 x0 = cur.position()
                 cur.insertText(tk["text"], fmt)
                 v.spans.append((x0, cur.position(), k))

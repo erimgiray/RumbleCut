@@ -159,6 +159,74 @@ def _num_icon(n: int, px: int = 26) -> QIcon:
     return icon
 
 
+def _media_icon(kind: str, colour: str = "#e5e7eb", px: int = 18) -> QIcon:
+    """Plain drawn icons for the player controls (no emoji): start, play, pause, end, speaker, gear."""
+    icon = QIcon()
+    for scale in (1, 2):
+        pm = QPixmap(px * scale, px * scale)
+        pm.setDevicePixelRatio(scale)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(colour))
+        s = px / 18.0
+
+        def tri(x0, x1, y0, y1, left=False):
+            path = QPainterPath()
+            if left:
+                path.moveTo(x1 * s, y0 * s); path.lineTo(x0 * s, (y0 + y1) / 2 * s); path.lineTo(x1 * s, y1 * s)
+            else:
+                path.moveTo(x0 * s, y0 * s); path.lineTo(x1 * s, (y0 + y1) / 2 * s); path.lineTo(x0 * s, y1 * s)
+            path.closeSubpath()
+            p.drawPath(path)
+        if kind == "play":
+            tri(5, 15, 3, 15)
+        elif kind == "pause":
+            p.drawRoundedRect(QRectF(4.5 * s, 3.5 * s, 3.4 * s, 11 * s), 1 * s, 1 * s)
+            p.drawRoundedRect(QRectF(10.1 * s, 3.5 * s, 3.4 * s, 11 * s), 1 * s, 1 * s)
+        elif kind == "start":
+            p.drawRect(QRectF(3.5 * s, 4 * s, 2 * s, 10 * s))
+            tri(5.5, 14.5, 4, 14, left=True)
+        elif kind == "end":
+            p.drawRect(QRectF(12.5 * s, 4 * s, 2 * s, 10 * s))
+            tri(3.5, 12.5, 4, 14)
+        elif kind == "speaker":
+            path = QPainterPath()
+            path.moveTo(2.5 * s, 7 * s); path.lineTo(6 * s, 7 * s); path.lineTo(10 * s, 3.5 * s)
+            path.lineTo(10 * s, 14.5 * s); path.lineTo(6 * s, 11 * s); path.lineTo(2.5 * s, 11 * s)
+            path.closeSubpath()
+            p.drawPath(path)
+            pen = QPen(QColor(colour), 1.4 * s)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(8.5 * s, 6 * s, 5 * s, 6 * s), -60 * 16, 120 * 16)
+            p.drawArc(QRectF(8 * s, 3.5 * s, 8.5 * s, 11 * s), -60 * 16, 120 * 16)
+        elif kind == "gear":
+            import math
+            c, r1, r2 = 9 * s, 7.6 * s, 5.6 * s
+            path = QPainterPath()
+            n = 8
+            for k in range(n * 2):
+                a0 = math.pi * 2 * k / (n * 2)
+                a1 = math.pi * 2 * (k + 1) / (n * 2)
+                r = r1 if k % 2 == 0 else r2
+                pts = [(c + r * math.cos(a0), c + r * math.sin(a0)), (c + r * math.cos(a1), c + r * math.sin(a1))]
+                if k == 0:
+                    path.moveTo(*pts[0])
+                else:
+                    path.lineTo(*pts[0])
+                path.lineTo(*pts[1])
+            path.closeSubpath()
+            hole = QPainterPath()
+            hole.addEllipse(QPointF(c, c), 2.4 * s, 2.4 * s)
+            p.drawPath(path.subtracted(hole))
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
 def _glyph_icon(glyph: str, px: int = 26) -> QIcon:
     """An emoji/symbol drawn as a 26 px tab icon, so every tab has the same icon + text layout
     (an emoji inside the tab text makes the tab bar a few pixels shorter, and the page jumps)."""
@@ -1403,7 +1471,7 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.scrubber)
         tr = QHBoxLayout()
         st = self.style()
-        self.btn_play = QToolButton(); self.btn_play.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
+        self.btn_play = QToolButton(); self.btn_play.setIcon(_media_icon("play", "#0b0d10"))
         self.btn_play.setToolTip("Play / pause (Space)")
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_play_clip = QPushButton("▶ Play clip")
@@ -1413,11 +1481,11 @@ class MainWindow(QMainWindow):
         self.btn_set_in.clicked.connect(lambda: self._set_edge("start"))
         self.btn_set_out = QPushButton("Set end  ]"); self.btn_set_out.setShortcut("O")
         self.btn_set_out.clicked.connect(lambda: self._set_edge("end"))
-        self.btn_to_start = QToolButton(); self.btn_to_start.setText("⏮")
+        self.btn_to_start = QToolButton(); self.btn_to_start.setIcon(_media_icon("start"))
         self.btn_to_start.setToolTip("Back to the start of the selected moment (Home)")
         self.btn_to_start.setShortcut("Home")
         self.btn_to_start.clicked.connect(lambda: self.skip_to_edge("start"))
-        self.btn_to_end = QToolButton(); self.btn_to_end.setText("⏭")
+        self.btn_to_end = QToolButton(); self.btn_to_end.setIcon(_media_icon("end"))
         self.btn_to_end.setToolTip("Jump to the end of the selected moment (End)")
         self.btn_to_end.setShortcut("End")
         self.btn_to_end.clicked.connect(lambda: self.skip_to_edge("end"))
@@ -1427,6 +1495,7 @@ class MainWindow(QMainWindow):
         self.btn_preview.setToolTip("Quick low-res render of the selected clip with all effects applied")
         self.btn_preview.clicked.connect(self.render_preview)
         self.vol = QSlider(Qt.Horizontal); self.vol.setRange(0, 100); self.vol.setValue(80); self.vol.setMaximumWidth(90)
+        self.vol.setMinimumHeight(26)            # room for the round handle (it was clipped)
         self.vol_lbl = QLabel("80%"); self.vol_lbl.setMinimumWidth(38)
         self.vol.valueChanged.connect(lambda x: self.vol_lbl.setText(f"{x}%"))
         if self.player and self.audio:
@@ -1443,7 +1512,10 @@ class MainWindow(QMainWindow):
             self._top_bar.insertWidget(k, wdg)
             k += 1
         self.btn_play.setMinimumWidth(44)
-        self.btn_play.setObjectName("playbtn")           # green, so it stands out up there
+        self.btn_play.setObjectName("playbtn")           # green while paused, so it stands out up there
+        self.btn_play.setProperty("paused", True)
+        for b in (self.btn_play, self.btn_to_start, self.btn_to_end):
+            b.setIconSize(QSize(18, 18))
         self.pos_label.setMinimumWidth(92)
         self.vol.setMaximumWidth(72)
         tr2 = QHBoxLayout()
@@ -2803,7 +2875,7 @@ class MainWindow(QMainWindow):
 
     def _studio_state(self, state):
         playing = state == QMediaPlayer.PlayingState
-        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause if playing else QStyle.SP_MediaPlay))
+        self._set_play_icon(playing)
         if hasattr(self, "script_tab"):
             self.script_tab.btn_play.setText("■ Stop" if playing else "▶ Play the edit")
 
@@ -2821,6 +2893,20 @@ class MainWindow(QMainWindow):
         """Go to Export & publish → Post online."""
         self.tabs.setCurrentIndex(self.export_index)
         self.out_tabs.setCurrentIndex(1)
+
+    def _set_play_icon(self, playing: bool):
+        """Play button: green with ► while paused (press to play); plain with ‖ while playing."""
+        b = self.btn_play
+        b.setIcon(_media_icon("pause") if playing else _media_icon("play", "#0b0d10"))
+        b.setProperty("paused", not playing)
+        b.style().unpolish(b)
+        b.style().polish(b)
+
+    @staticmethod
+    def _speaker_lbl() -> QLabel:
+        lab = QLabel()
+        lab.setPixmap(_media_icon("speaker", "#9ca3af").pixmap(18, 18))
+        return lab
 
     def pause_studio(self):
         if self.player and self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -2846,7 +2932,7 @@ class MainWindow(QMainWindow):
             if playing and self.player:
                 self._clip_stop_at = None
                 self.player.pause()
-                self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+                self._set_play_icon(False)
 
     def nudge(self, dt):
         if self.player:
@@ -2862,11 +2948,11 @@ class MainWindow(QMainWindow):
             return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
-            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            self._set_play_icon(False)
         else:
             self._clip_stop_at = None
             self.player.play()
-            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            self._set_play_icon(True)
 
     def play_clip(self):
         c = self.current_clip()
@@ -2875,7 +2961,7 @@ class MainWindow(QMainWindow):
         self.seek_clip(c, c.start)
         self._clip_stop_at = c.end
         self.player.play()
-        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self._set_play_icon(True)
 
     def _pos_changed(self, ms):
         t = ms / 1000
@@ -2893,7 +2979,7 @@ class MainWindow(QMainWindow):
         if self._clip_stop_at is not None and t >= self._clip_stop_at:
             self._clip_stop_at = None
             self.player.pause()
-            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            self._set_play_icon(False)
 
     def _set_edge(self, which):
         c = self.current_clip()
@@ -4572,8 +4658,8 @@ QToolButton#helpbtn {{ border-radius: 19px; font-size: 18px; font-weight: 700; p
 QToolButton#helpbtn:hover {{ background: {ACCENT}; border-color: {ACCENT}; color: #0b0d10; }}
 QListWidget#helptopics::item {{ padding: 8px 6px; }}
 QTextBrowser#helptext {{ background: #16191f; border: 1px solid #2c3038; border-radius: 8px; font-size: 14px; }}
-QToolButton#playbtn {{ background: {ACCENT}; border-color: {ACCENT}; }}
-QToolButton#playbtn:hover {{ background: #9bd85a; }}
+QToolButton#playbtn[paused="true"] {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QToolButton#playbtn[paused="true"]:hover {{ background: #9bd85a; }}
 QFrame#vsep {{ color: #3a3f47; margin: 2px 6px; }}
 QFrame#cardline {{ background: #2c3038; border: none; }}
 QCheckBox#cardtitle, QLabel#cardtitle {{ font-size: 14px; font-weight: 600; color: #e5e7eb; spacing: 8px; }}
@@ -4613,7 +4699,8 @@ QListWidget::item:selected {{ background: #2d3a22; color: #fff; }}
 QProgressBar {{ background: #121418; border: 1px solid #2c3038; border-radius: 6px; text-align: center; height: 16px; }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #333844; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; margin: -6px 0; border-radius: 7px; }}
+QSlider:horizontal {{ min-height: 24px; }}
+QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }}
 QScrollArea {{ border: none; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px 2px 3px 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0 3px 2px 3px; }}
