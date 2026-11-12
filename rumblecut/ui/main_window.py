@@ -159,6 +159,28 @@ def _num_icon(n: int, px: int = 26) -> QIcon:
     return icon
 
 
+def _glyph_icon(glyph: str, px: int = 26) -> QIcon:
+    """An emoji/symbol drawn as a 26 px tab icon, so every tab has the same icon + text layout
+    (an emoji inside the tab text makes the tab bar a few pixels shorter, and the page jumps)."""
+    icon = QIcon()
+    for state, col in ((QIcon.Off, QColor("#9ca3af")), (QIcon.On, QColor("#ffffff"))):
+        for scale in (1, 2):
+            pm = QPixmap(px * scale, px * scale)
+            pm.setDevicePixelRatio(scale)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            f = QFont()
+            f.setPixelSize(int(px * 0.62))
+            p.setFont(f)
+            p.setPen(col)
+            p.drawText(QRectF(0, 0, px, px), Qt.AlignCenter, glyph)
+            p.end()
+            icon.addPixmap(pm, QIcon.Normal, state)
+    return icon
+
+
 def _menu_icon(w: int = 18, h: int = 14) -> QIcon:
     """Three equally spaced lines (the ☰ glyph renders unevenly in most fonts)."""
     icon = QIcon()
@@ -456,15 +478,15 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_studio_tab(), _num_icon(2), "Clip studio")
         self.tabs.addTab(self._build_export_tab(), _num_icon(3), "Export")
         self.tabs.setIconSize(QSize(26, 26))
-        self.ctx_index = self.tabs.addTab(self._build_context_tab(), "🎬  Edit clips")
+        self.ctx_index = self.tabs.addTab(self._build_context_tab(), _glyph_icon("🎬"), "Edit clips")
         from .publish_tab import PublishTab
         self.pub_tab = PublishTab(self)
-        self.pub_index = self.tabs.addTab(self.pub_tab, "🚀  Publish")
+        self.pub_index = self.tabs.addTab(self.pub_tab, _glyph_icon("🚀"), "Publish")
         _sc = QScrollArea()
         self._settings_scroll = _sc
         _sc.setWidgetResizable(True)
         _sc.setWidget(self._build_settings_tab())
-        self.settings_index = self.tabs.addTab(_sc, "⚙  Settings")
+        self.settings_index = self.tabs.addTab(_sc, _glyph_icon("⚙"), "Settings")
         self.tabs.currentChanged.connect(lambda i: i == self.settings_index and self._load_about())
         self.tabs.currentChanged.connect(lambda i: i == self.ctx_index and (
             self.script_tab if self.edit_tabs.currentIndex() == 0 else self.ctx_tab).refresh())
@@ -4058,7 +4080,7 @@ class MainWindow(QMainWindow):
         else:
             self.u_dl_status.setText(f"Couldn't check: {r.get('dl_err', 'unknown error')}")
             self.u_dl_btn.hide()
-        self.tabs.setTabText(self.settings_index, "⚙  Settings  ●" if found else "⚙  Settings")
+        self.tabs.setTabText(self.settings_index, "Settings  ●" if found else "Settings")
         if found:
             self.u_status.setText("Update available: " + ", ".join(found))
             if silent:
