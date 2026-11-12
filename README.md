@@ -203,7 +203,8 @@ Post moments to **YouTube, Instagram, TikTok and X** straight from RumbleCut.
 
 Trim a clip by editing its transcript, like a document: delete words in the text and they're cut from the video.
 
-1. In **🎬 Edit clips → ✂ Script** pick a moment (or press **✂ Cut words by script** in the Clip studio) and press **📝 Get the script**. Every word is written out with its own timing. Gaps show as **⏸ pauses** (blue) or **[… ]** (purple) where someone spoke but the speech-to-text left it out; that's usually an "um".
+1. In **🎬 Edit clips → ✂ Script** press **📝 Get the script**. The **whole stream** is written out, every word with its own timing: the moments first, then everything before and after them, filling in as it goes (with a time at the start of each paragraph). You can **■ Stop writing** and carry on later (the button shows how much is done); it's saved with your session. Each moment is marked **⟦3 … 3⟧** in the text and tinted in its colour; the one you've picked is brighter and editable. Gaps inside it show as **⏸ pauses** (blue) or **[… ]** (purple) where someone spoke but the speech-to-text left it out; that's usually an "um".
+   - **Move a moment's start or end with the words:** right-click any word, before, inside or after the moment, and choose **⟦ Start it at "word"**, **End it after "word" ⟧**, or **start/end it where this sentence starts/ends** (by its punctuation). Or click a word and press **⟦ Start here** / **End here ⟧**, or select some words and press **⟦ Selection ⟧**. The right-click menu can also make a **＋ New moment from this sentence** (or from the selected words), go to another moment, or play from there. Click any word to hear it; **⌖ Go to the moment** scrolls back to it.
 2. **Select words and press Delete** to cut them; **Enter** brings them back; double-click a word to toggle it. **Ctrl+Z / Ctrl+Shift+Z** undo and redo (here they step through your cuts first).
 3. Let RumbleCut suggest cuts (amber, struck through), then **✓ Accept** or **✖ Keep** each one, or all at once:
    - **🧹 Quick clean-up** (no AI): "um"/"uh", stutters and repeated words ("I I think"), pauses longer than 0.6 s (shortened to 0.25 s), and unscripted bits.
@@ -213,7 +214,7 @@ Trim a clip by editing its transcript, like a document: delete words in the text
 
 Context pictures stay on the words they belong to when you cut around them, and the export, Publish and preview all use the edited clip.
 
-**Where you are:** above the script, a strip of the whole stream shows every moment (the one you're editing is outlined; click another to switch, drag one to move it, right-click for options). Under it, the moment's own timeline shows the cuts hatched; drag its handles to change where it starts and ends. If you stretch it past the words in the script, press **📝 Get the script again**.
+**Where you are:** above the script, a strip of the whole stream shows every moment (the one you're editing is outlined; click another to switch, drag one to move it, right-click for options). Under it, the moment's own timeline shows the cuts hatched; drag its handles to change where it starts and ends. The text follows as you drag.
 
 **This moment's look** (beside the script): title, speed, zoom, colour look, vignette, fades and caption, kept in step with the Clip studio. **👁 Preview with effects** renders a small copy with everything applied and plays it there.
 

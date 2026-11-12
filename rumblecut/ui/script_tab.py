@@ -1,19 +1,22 @@
 """✂ Script: edit a clip by deleting words from its transcript."""
 from __future__ import annotations
 
+import bisect
 import copy
 import os
+import queue
+import time
 
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
+    QMenu, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from .. import ai, editor, script_edit as se, transcribe
-from .timeline import ClipTimeline, Timeline, fmt_time
+from .timeline import ClipTimeline, Timeline, _origin_colour, fmt_time
 from .workers import Worker
 
 try:
@@ -35,6 +38,8 @@ class ScriptView(QTextEdit):
     restore_requested = Signal()
     word_clicked = Signal(int)          # token index
     toggle_requested = Signal(int)
+    time_clicked = Signal(float)        # a word outside the moment (project time)
+    menu_requested = Signal(int, object)  # right-click: char position, global position
 
     def __init__(self):
         super().__init__()
@@ -44,7 +49,26 @@ class ScriptView(QTextEdit):
         f = QFont(self.font())
         f.setPointSizeF(f.pointSizeF() * 1.4)
         self.setFont(f)
-        self.spans: list[tuple[int, int, int]] = []      # (char start, char end, token index)
+        self.spans: list[tuple[int, int, int]] = []      # (char start, char end, token index) - this moment
+        self.wspans: list[tuple[int, int, float, float]] = []   # every word: (char a, char b, t0, t1) project time
+        self._wkeys: list[int] = []
+
+    def word_at(self, pos: int):
+        """(index into wspans) of the word at a character position, or the nearest one before it."""
+        if not self.wspans:
+            return None
+        if len(self._wkeys) != len(self.wspans):
+            self._wkeys = [x[0] for x in self.wspans]
+        i = bisect.bisect_right(self._wkeys, pos) - 1
+        return max(0, i)
+
+    def contextMenuEvent(self, ev):
+        pos = self.cursorForPosition(ev.pos()).position()
+        c = self.textCursor()
+        if not (c.hasSelection() and c.selectionStart() <= pos <= c.selectionEnd()):
+            c.setPosition(pos)
+            self.setTextCursor(c)
+        self.menu_requested.emit(pos, ev.globalPos())
 
     def token_at(self, pos: int) -> int | None:
         for a, b, k in self.spans:
@@ -72,9 +96,14 @@ class ScriptView(QTextEdit):
     def mouseReleaseEvent(self, ev):
         super().mouseReleaseEvent(ev)
         if ev.button() == Qt.LeftButton and not self.textCursor().hasSelection():
-            k = self.token_at(self.cursorForPosition(ev.position().toPoint()).position())
+            pos = self.cursorForPosition(ev.position().toPoint()).position()
+            k = self.token_at(pos)
             if k is not None:
                 self.word_clicked.emit(k)
+                return
+            i = self.word_at(pos)
+            if i is not None and self.wspans[i][0] <= pos <= self.wspans[i][1]:
+                self.time_clicked.emit(self.wspans[i][2])
 
     def mouseDoubleClickEvent(self, ev):
         k = self.token_at(self.cursorForPosition(ev.position().toPoint()).position())
@@ -95,6 +124,11 @@ class ScriptPanel(QWidget):
         self._preview = False              # playing the rendered "with effects" preview
         self._loading = False
         self._push_clip = None
+        self._script_q: queue.Queue = queue.Queue()      # written-out stretches arriving from the job
+        self._drain = QTimer(self)
+        self._drain.timeout.connect(self._drain_script)
+        self._last_render = 0.0
+        self._free_play = False             # playing the stream outside the moment
         self._push_timer = QTimer(self)
         self._push_timer.setSingleShot(True)
         self._push_timer.timeout.connect(self._do_push)
@@ -110,7 +144,8 @@ class ScriptPanel(QWidget):
         top.addWidget(self.moment, 1)
         self.btn_load = QPushButton("📝 Get the script")
         self.btn_load.setObjectName("primary")
-        self.btn_load.setToolTip("Write out every word of this moment with its exact timing")
+        self.btn_load.setToolTip("Write out every word of the whole stream with its exact timing - the moments "
+                                 "first, then everything before and after. You can stop and carry on later.")
         self.btn_load.clicked.connect(self.load_script)
         top.addWidget(self.btn_load)
         v.addLayout(top)
@@ -189,7 +224,25 @@ class ScriptPanel(QWidget):
         self.view.restore_requested.connect(self.restore_selected)
         self.view.word_clicked.connect(self._token_clicked)
         self.view.toggle_requested.connect(self._toggle_token)
+        self.view.time_clicked.connect(self._play_free)
+        self.view.menu_requested.connect(self._word_menu)
         lv.addWidget(self.view, 1)
+        brow = QHBoxLayout()
+        self.btn_from = QPushButton("⟦ Start here")
+        self.btn_from.setToolTip("Start the moment at the word you clicked (or the first selected word)")
+        self.btn_from.clicked.connect(lambda: self._edge_from_cursor("start"))
+        self.btn_to = QPushButton("End here ⟧")
+        self.btn_to.setToolTip("End the moment after the word you clicked (or the last selected word)")
+        self.btn_to.clicked.connect(lambda: self._edge_from_cursor("end"))
+        self.btn_sel = QPushButton("⟦ Selection ⟧")
+        self.btn_sel.setToolTip("Make the selected words the moment")
+        self.btn_sel.clicked.connect(self._selection_to_moment)
+        self.btn_find = QPushButton("⌖ Go to the moment")
+        self.btn_find.clicked.connect(lambda: self._scroll_to_moment())
+        for b in (self.btn_from, self.btn_to, self.btn_sel, self.btn_find):
+            brow.addWidget(b)
+        brow.addStretch()
+        lv.addLayout(brow)
         erow = QHBoxLayout()
         self.btn_cut = QPushButton("✂ Cut selected  (Del)")
         self.btn_cut.clicked.connect(self.cut_selected)
@@ -209,8 +262,10 @@ class ScriptPanel(QWidget):
             f"<span style='color:{COL['word']}'>kept</span> · <s style='color:{COL['cut']}'>cut</s> · "
             f"<span style='color:{COL['sugg_fg']};background:{COL['sugg_bg']}'>&nbsp;suggested cut&nbsp;</span> · "
             f"<span style='color:{COL['pause']}'>⏸ pause</span> · "
-            f"<span style='color:{COL['unheard']}'>[… not in the script]</span>   —   select words and press "
-            "Delete to cut, Enter to bring them back · click a word to play from it · double-click to toggle")
+            f"<span style='color:{COL['unheard']}'>[… not in the script]</span> · "
+            "<b>⟦3</b> … <b>3⟧</b> where moment 3 starts and ends   —   right-click a word to start or end the "
+            "moment there (or at its sentence) · select words and press Delete to cut, Enter to bring them back · "
+            "click a word to play from it")
         self.legend.setObjectName("muted")
         self.legend.setWordWrap(True)
         lv.addWidget(self.legend)
@@ -324,15 +379,24 @@ class ScriptPanel(QWidget):
             self.note.setText("<p style='font-size:36px;margin:0'>🔊</p>Audio only - you'll hear the edit"
                               if not has_v else "")
             self.stack.setCurrentIndex(0 if (self.player and has_v) else self.stack.count() - 1)
-        self._render()
+            self._sync_words(c)
+        self._render(scroll="moment")
         self._update_buttons()
 
     def _update_buttons(self):
         c = self.current_clip()
         has_words = bool(c and c.words)
         busy = self._worker is not None and self._worker.isRunning()
-        self.btn_load.setEnabled(c is not None and not busy)
-        self.btn_load.setText("📝 Get the script again" if has_words else "📝 Get the script")
+        writing = busy and getattr(self, "_writing", False)
+        self.btn_load.setEnabled(bool(self.project.source) and (not busy or writing))
+        frac = self._written_fraction()
+        self.btn_load.setText("■ Stop writing" if writing else
+                              "📝 Get the script" if frac <= 0 else
+                              f"📝 Carry on with the script ({frac * 100:.0f}% done)" if frac < 0.995 else
+                              "📝 Get the script again")
+        for b in (self.btn_from, self.btn_to, self.btn_sel):
+            b.setEnabled(c is not None and bool(self.view.wspans))
+        self.btn_find.setEnabled(c is not None)
         for b in (self.btn_clean, self.btn_ai, self.btn_cut, self.btn_restore, self.btn_play):
             b.setEnabled(has_words and not busy)
         self.btn_fx.setEnabled(c is not None and not busy)
@@ -356,57 +420,252 @@ class ScriptPanel(QWidget):
         return q
 
     # ------------------------------------------------------------------ the text
-    def _render(self):
-        c = self.current_clip()
-        self.view.clear()
-        self.view.spans = []
-        self._toks = []
-        if c is None:
-            self.view.setPlainText("No moments yet - find highlights in the Clip studio first.")
-            self.lengths.setText("")
+    # ------------------------------------------------------------------ the whole script
+    def _covered(self) -> list[tuple[float, float]]:
+        """Stretches of the stream (project time) that have been written out."""
+        if self.project.script_done:
+            return [(float(a), float(b)) for a, b in self.project.script_done]
+        out = []
+        for c in self.project.clips:
+            if c.words:
+                out.append((c.words[0][0] + c.offset, c.words[-1][1] + c.offset))
+        return sorted(out)
+
+    def _written_fraction(self) -> float:
+        dur = self.win.info.duration if getattr(self.win, "info", None) else 0
+        if not dur or not self.project.script_done:
+            return 0.0
+        return min(1.0, sum(b - a for a, b in self.project.script_done) / dur)
+
+    def _script_words(self) -> list:
+        """Every word known, in project time - the whole-stream script, or (older projects) the moments' own."""
+        if self.project.script:
+            return self.project.script
+        seen, ws = set(), []
+        for c in self.project.clips:
+            for a, b, w in c.words:
+                k = (round(a + c.offset, 2), w)
+                if k not in seen:
+                    seen.add(k)
+                    ws.append([a + c.offset, b + c.offset, w])
+        ws.sort(key=lambda x: x[0])
+        return ws
+
+    def _sync_words(self, c):
+        """Give a moment the words around it from the whole script (its cuts stay as they are)."""
+        sc = self.project.script
+        if not (c and sc):
             return
-        if not c.words:
-            self.view.setPlainText("Press “📝 Get the script” to write out every word of this moment.\n\n"
-                                   "Then select words and press Delete to cut them from the clip - the video "
-                                   "follows the text. 🧹 Quick clean-up and ✨ Tighten with AI suggest cuts "
-                                   "for you to accept or keep.")
+        a, b = c.start + c.offset - 60, c.end + c.offset + 60
+        keys = getattr(self, "_sc_keys", None)
+        if keys is None or len(keys) != len(sc):
+            keys = self._sc_keys = [w[0] for w in sc]
+        i, j = bisect.bisect_left(keys, a), bisect.bisect_right(keys, b)
+        ws = [[round(x - c.offset, 3), round(y - c.offset, 3), w] for x, y, w in sc[i:j]]
+        lo, hi = c.start + c.offset, c.end + c.offset
+        if ws and any(x <= lo + 1 and y >= hi - 1 for x, y in self._covered()) or len(ws) > len(c.words):
+            c.words = ws
+
+    def _render(self, scroll: str = "keep"):
+        """Write out the whole script: every moment marked ⟦n … n⟧ and tinted, the selected one editable
+        (cuts struck through, suggestions highlighted, pauses shown)."""
+        c = self.current_clip()
+        v = self.view
+        sb = v.verticalScrollBar()
+        keep_val = sb.value()
+        v.setUpdatesEnabled(False)
+        v.clear()
+        v.spans, v.wspans, v._wkeys = [], [], []
+        self._toks = []
+        self._moment_pos = None
+        ws = self._script_words()
+        if not ws and not (c and c.words):
+            v.setPlainText("Press “📝 Get the script” to write out every word of the stream - the moments first, "
+                           "then everything before and after them.\n\n"
+                           "Each moment is marked ⟦1 … 1⟧ in the text. Right-click a word to start or end a moment "
+                           "there, or at the start or end of its sentence. Select words in a moment and press "
+                           "Delete to cut them from the clip - the video follows the text.")
+            v.setUpdatesEnabled(True)
             self._lengths()
             return
-        q = self._quiet.get(id(c))
-        self._toks = se.tokens(c, q)
-        sugg = c.cut_suggestions
-        cur = self.view.textCursor()
-        cur.movePosition(QTextCursor.Start)
+        clips = self.project.clips
+        cur = QTextCursor(v.document())
+        cur.beginEditBlock()
         base = QTextCharFormat()
         base.setForeground(QBrush(QColor(COL["word"])))
-        for k, tk in enumerate(self._toks):
+        stamp = QTextCharFormat()
+        stamp.setForeground(QBrush(QColor("#6b7280")))
+        stamp.setFontPointSize(max(7.0, v.font().pointSizeF() * 0.62))
+        gapf = QTextCharFormat(stamp)
+        gapf.setFontItalic(True)
+
+        def tint(origin, alpha):
+            col = QColor(_origin_colour(origin))
+            col.setAlpha(alpha)
+            return QBrush(col)
+
+        marks = []          # (time, order, kind, clip index): starts before ends at the same time
+        for i, x in enumerate(clips):
+            marks.append((x.start + x.offset, 0, "start", i))
+            marks.append((x.end + x.offset, 1, "end", i))
+        marks.sort()
+        mi = 0
+        open_ = set()
+
+        def put_marks(t, inclusive=True):
+            nonlocal mi
+            while mi < len(marks) and (marks[mi][0] <= t if inclusive else marks[mi][0] < t):
+                mt, _, kind, i = marks[mi]
+                mi += 1
+                x = clips[i]
+                f = QTextCharFormat()
+                col = QColor(_origin_colour(x.origin))
+                if x.hidden:
+                    col = QColor("#9ca3af")
+                f.setForeground(QBrush(col))
+                f.setFontWeight(QFont.Black if x is c else QFont.Bold)
+                if x is c:
+                    f.setFontPointSize(v.font().pointSizeF() * 1.15)
+                tag = "?" if x.hidden else str(i + 1)
+                f.setToolTip(f"{i + 1}. {x.title}")
+                if kind == "start":
+                    if x is c:
+                        self._moment_pos = cur.position()
+                    cur.insertText(f"⟦{tag} ", f)
+                    open_.add(i)
+                else:
+                    cur.insertText(f" {tag}⟧ ", f)
+                    open_.discard(i)
+
+        def word_tint(t):
+            for i in sorted(open_):
+                x = clips[i]
+                if x is not c and not x.hidden:
+                    return tint(x.origin, 45)
+            return None
+
+        par_t = [0.0]
+
+        def new_par(t):
+            cur.insertBlock()
+            cur.insertText(f"{fmt_time(self.project.to_stream(t))}   ", stamp)
+            par_t[0] = t
+
+        covered = self._covered()
+
+        def is_covered(a, b):
+            return any(x <= a + 1 and y >= b - 1 for x, y in covered)
+
+        cs, ce = (c.start + c.offset, c.end + c.offset) if c else (None, None)
+        q = self._quiet.get(id(c)) if c else None
+        ctoks = se.tokens(c, q) if (c and c.words) else []
+        sugg = c.cut_suggestions if c else []
+        done_current = c is None
+        prev = None                                  # previous word (a, b, text)
+        first = True
+
+        def insert_current():
+            nonlocal done_current, prev, first
+            done_current = True
+            put_marks(cs)
+            if not ctoks:
+                cur.insertText(" (not written out yet - press 📝 Get the script) ", gapf)
+            for k, tk in enumerate(ctoks):
+                fmt = QTextCharFormat(base)
+                a, b = tk["start"], tk["end"]
+                if tk["kind"] == "pause":
+                    fmt.setForeground(QBrush(QColor(COL["pause"])))
+                    fmt.setFontItalic(True)
+                    ca, cb = se.pause_cut_range(a, b)
+                    cut = se.is_cut(c, ca, cb)
+                else:
+                    cut = se.is_cut(c, a, b)
+                    if tk["kind"] == "unheard":
+                        fmt.setForeground(QBrush(QColor(COL["unheard"])))
+                sg = next((s_ for s_ in sugg if s_["start"] - 0.02 <= (a + b) / 2 <= s_["end"] + 0.02
+                           or (tk["kind"] == "pause" and s_["kind"] == "pause" and a <= s_["start"] <= b)), None)
+                if cut:
+                    fmt.setForeground(QBrush(QColor(COL["cut"])))
+                    fmt.setFontStrikeOut(True)
+                elif sg:
+                    fmt.setForeground(QBrush(QColor(COL["sugg_fg"])))
+                    fmt.setBackground(QBrush(QColor(COL["ai_bg"] if sg["kind"] == "ai" else COL["sugg_bg"])))
+                    fmt.setFontStrikeOut(True)
+                    fmt.setToolTip(se.KIND_NAMES.get(sg["kind"], sg["kind"]) + (f" - {sg['why']}" if sg.get("why") else ""))
+                else:
+                    fmt.setBackground(tint(c.origin, 70))
+                x0 = cur.position()
+                cur.insertText(tk["text"], fmt)
+                v.spans.append((x0, cur.position(), k))
+                if tk["kind"] == "word":
+                    v.wspans.append((x0, cur.position(), a + c.offset, b + c.offset))
+                    prev = (a + c.offset, b + c.offset, tk["text"])
+                self._toks.append(tk)
+                cur.insertText(" ", base)
+            put_marks(ce)
+            first = False
+
+        for a, b, w in ws:
+            if c is not None and not done_current and (a >= cs - 0.01 or b > cs):
+                if prev is not None and cs - prev[1] > 1.2:
+                    put_marks(cs, inclusive=False)
+                    new_par(cs)
+                insert_current()
+            if c is not None and done_current and a < ce and b > cs:
+                continue                              # this moment's words are written above
+            # paragraphs: a new line after a sentence and a pause, or after a long pause
+            if first:
+                cur.insertText(f"{fmt_time(self.project.to_stream(a))}   ", stamp)
+                par_t[0] = a
+                first = False
+            elif prev is not None:
+                gap = a - prev[1]
+                if gap > 30 and not is_covered(prev[1], a):
+                    put_marks(prev[1] + 0.01)
+                    cur.insertBlock()
+                    cur.insertText(f"[… {fmt_time(self.project.to_stream(prev[1]))} – "
+                                   f"{fmt_time(self.project.to_stream(a))} not written out yet]", gapf)
+                    new_par(a)
+                elif gap > 3.0 or (gap > 1.2 and prev[2][-1:] in ".?!") or \
+                        (a - par_t[0] > 45 and prev[2][-1:] in ".?!"):      # keep paragraphs readable
+                    put_marks(a, inclusive=False)
+                    new_par(a)
+            put_marks(a)
             fmt = QTextCharFormat(base)
-            a, b = tk["start"], tk["end"]
-            if tk["kind"] == "pause":
-                fmt.setForeground(QBrush(QColor(COL["pause"])))
-                fmt.setFontItalic(True)
-                ca, cb = se.pause_cut_range(a, b)
-                cut = se.is_cut(c, ca, cb)
-            else:
-                cut = se.is_cut(c, a, b)
-                if tk["kind"] == "unheard":
-                    fmt.setForeground(QBrush(QColor(COL["unheard"])))
-            sg = next((s for s in sugg if s["start"] - 0.02 <= (a + b) / 2 <= s["end"] + 0.02
-                       or (tk["kind"] == "pause" and s["kind"] == "pause" and a <= s["start"] <= b)), None)
-            if cut:
-                fmt.setForeground(QBrush(QColor(COL["cut"])))
-                fmt.setFontStrikeOut(True)
-            elif sg:
-                fmt.setForeground(QBrush(QColor(COL["sugg_fg"])))
-                fmt.setBackground(QBrush(QColor(COL["ai_bg"] if sg["kind"] == "ai" else COL["sugg_bg"])))
-                fmt.setFontStrikeOut(True)
-                fmt.setToolTip(se.KIND_NAMES.get(sg["kind"], sg["kind"]) + (f" - {sg['why']}" if sg.get("why") else ""))
-            start = cur.position()
-            cur.insertText(tk["text"], fmt)
-            self.view.spans.append((start, cur.position(), k))
+            tb = word_tint(a)
+            if tb is not None:
+                fmt.setBackground(tb)
+            x0 = cur.position()
+            cur.insertText(w, fmt)
+            v.wspans.append((x0, cur.position(), float(a), float(b)))
             cur.insertText(" ", base)
-        self.view.moveCursor(QTextCursor.Start)
+            prev = (float(a), float(b), w)
+        if c is not None and not done_current:
+            if prev is not None:
+                new_par(cs)
+            insert_current()
+        put_marks(1e12)
+        cur.endEditBlock()
+        v._wkeys = [x[0] for x in v.wspans]
+        v.setUpdatesEnabled(True)
+        if scroll == "moment":
+            self._scroll_to_moment()
+        else:
+            sb.setValue(keep_val)
+        self._last_render = time.monotonic()
         self._lengths()
+
+    def _scroll_to_moment(self):
+        if self._moment_pos is None:
+            return
+        v = self.view
+        cur = v.textCursor()
+        cur.setPosition(self._moment_pos)
+        v.setTextCursor(cur)
+        v.ensureCursorVisible()
+        r = v.cursorRect(cur)
+        sb = v.verticalScrollBar()
+        sb.setValue(sb.value() + r.top() - v.viewport().height() // 5)
 
     def _lengths(self):
         c = self.current_clip()
@@ -585,34 +844,302 @@ class ScriptPanel(QWidget):
         self.win._start(w)
 
     def load_script(self):
-        c = self.current_clip()
-        if not c or (self._worker is not None and self._worker.isRunning()):
+        """📝 Write out the whole stream - the moments first, then everything before and after them.
+        Stretches arrive as they're done; it can be stopped and carried on later."""
+        if self._worker is not None and self._worker.isRunning():
+            if getattr(self, "_writing", False):
+                self._worker.cancel()
+                self.status.setText("Stopping after this stretch…")
+            return
+        src = self.project.source
+        info = getattr(self.win, "info", None)
+        if not src or not info or not info.duration:
             return
         if not transcribe.available():
             QMessageBox.information(self, "Script", "Speech-to-text isn't included in this copy of RumbleCut.")
             return
-        if c.cuts and QMessageBox.question(
-                self, "Script", "Get the script again? Your cuts stay where they are in the clip.") != QMessageBox.Yes:
-            return
+        dur = float(info.duration)
+        if self._written_fraction() >= 0.995:
+            if QMessageBox.question(self, "Script", "Write out the whole stream again? Your cuts stay where they "
+                                    "are.") != QMessageBox.Yes:
+                return
+            self.project.script, self.project.script_done = [], []
+        # what still needs writing, in 120 s pieces: around the moments first, then the rest in order
+        done = [(float(x), float(y)) for x, y in self.project.script_done]
+
+        def todo(a, b):
+            out, pos = [], a
+            for x, y in sorted(done):
+                if y <= pos or x >= b:
+                    continue
+                if x > pos:
+                    out.append((pos, min(x, b)))
+                pos = max(pos, y)
+            if pos < b:
+                out.append((pos, b))
+            return out
+        pieces = []
+        for a, b in [(0.0, dur)]:
+            for x, y in todo(a, b):
+                t = x
+                while t < y - 0.5:
+                    pieces.append((t, min(y, t + 120.0)))
+                    t += 120.0
+        cur = self.current_clip()
+        focus = [x for x in self.project.clips if x.source == src or True]
+        focus.sort(key=lambda x: (x is not cur, x.start + x.offset))
+
+        def prio(p):
+            for n, x in enumerate(focus):
+                a, b = x.start + x.offset - 90, x.end + x.offset + 90
+                if p[1] > a and p[0] < b:
+                    return (0, n, p[0])
+            return (1, 0, p[0])
+        pieces.sort(key=prio)
+        total = sum(b - a for a, b in pieces) or 1.0
+        q = self._script_q
+        t0 = time.monotonic()
 
         def job(on_progress=None, cancel=None):
-            ws = transcribe.transcribe_words(c.source, c.start, c.end, on_progress=on_progress, cancel=cancel)
-            on_progress(0.98, "Measuring the pauses…")
-            t, db = se.energy(c.source, c.start, c.end)
-            return ws, t, db
+            got = 0.0
+            for a, b in pieces:
+                if cancel and cancel():
+                    break
+                ws = transcribe.transcribe_words(src, max(0.0, a - 1.0), min(dur, b + 1.0), cancel=cancel)
+                q.put((a, b, [(x, y, w) for x, y, w in ws if a <= x < b]))
+                got += b - a
+                el = time.monotonic() - t0
+                left = el / got * (total - got) if got else 0
+                on_progress(got / total, f"📝 Writing out the stream… {self._done_minutes(got)} of "
+                            f"{total / 60:.0f} min" + (f" · about {left / 60:.0f} min left" if got > 60 else ""))
+            return got
 
-        def done(r):
-            ws, t, db = r
-            c.words = [[round(a, 3), round(b, 3), w] for a, b, w in ws]
-            q = se.Quiet(t, db)
-            q._span = (c.source, c.start, c.end)
-            self._quiet[id(c)] = q
-            self.progress.setValue(1000)
-            self.status.setText(f"📝 {len(ws)} words" if ws else "No speech found in this moment")
-            self._render()
-            self._update_buttons()
-            self.win._clip_edited(c)
-        self._run(job, done, "Writing out every word…")
+        def finished_ok(got):
+            self._drain_script()
+            frac = self._written_fraction()
+            self.progress.setValue(int(frac * 1000))
+            self.status.setText("📝 The whole stream is written out" if frac >= 0.995 else
+                                f"📝 {frac * 100:.0f}% of the stream written out - press the button to carry on")
+        self._writing = True
+        if not pieces:
+            self.status.setText("📝 The whole stream is already written out")
+            self._writing = False
+            return
+        self._run(job, finished_ok, "📝 Writing out the stream - the moments first…")
+        self._worker.finished.connect(lambda: (setattr(self, "_writing", False), self._drain.stop(),
+                                               self._drain_script(), self._update_buttons()))
+        self._worker.cancelled.connect(lambda: self.status.setText(
+            f"Stopped - {self._written_fraction() * 100:.0f}% written out. Press the button to carry on."))
+        self._drain.start(1500)
+        self._update_buttons()
+
+    @staticmethod
+    def _done_minutes(secs: float) -> str:
+        return f"{secs / 60:.0f}"
+
+    def _drain_script(self):
+        """Merge written-out stretches into the project's script and show them."""
+        got = []
+        while True:
+            try:
+                got.append(self._script_q.get_nowait())
+            except queue.Empty:
+                break
+        if not got:
+            return
+        sc = list(self.project.script)
+        done = [list(x) for x in self.project.script_done]
+        for a, b, ws in got:
+            sc = [w for w in sc if not (a <= w[0] < b)] + [[round(x, 3), round(y, 3), w] for x, y, w in ws]
+            done.append([a, b])
+        sc.sort(key=lambda w: w[0])
+        done.sort()
+        merged = []
+        for a, b in done:
+            if merged and a <= merged[-1][1] + 0.01:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        self.project.script, self.project.script_done = sc, merged
+        self._sc_keys = None
+        for c in self.project.clips:
+            lo, hi = c.start + c.offset, c.end + c.offset
+            if any(a < hi and b > lo for a, b, _ in got):
+                self._sync_words(c)
+                if c is not self.current_clip():
+                    self.win._clip_edited(c)
+        busy = self._worker is not None and self._worker.isRunning()
+        if not busy or time.monotonic() - self._last_render > 4.0 or self._moment_pos is None:
+            self._render(scroll="moment" if self._moment_pos is None else "keep")
+        self._update_buttons()
+
+    # ------------------------------------------------------------------ moments from the words
+    def _word_index(self, t: float) -> int:
+        ws = self._script_words()
+        keys = [w[0] for w in ws]
+        return max(0, min(len(ws) - 1, bisect.bisect_right(keys, t + 1e-3) - 1))
+
+    def _sentence(self, t: float) -> tuple[float, float, str]:
+        """The sentence around the word at t (project time): from after the last . ? ! or long pause to the
+        next one."""
+        ws = self._script_words()
+        if not ws:
+            return t, t, ""
+        i = self._word_index(t)
+        a = i
+        while a > 0 and ws[a - 1][2][-1:] not in ".?!" and ws[a][0] - ws[a - 1][1] < 1.5:
+            a -= 1
+        b = i
+        while b < len(ws) - 1 and ws[b][2][-1:] not in ".?!" and ws[b + 1][0] - ws[b][1] < 1.5:
+            b += 1
+        return float(ws[a][0]), float(ws[b][1]), " ".join(w for _, _, w in ws[a:b + 1])
+
+    def _edge_time(self, edge: str, t0: float, t1: float) -> float:
+        """Project time for a moment edge at a word: a breath before it starts, or just after it ends
+        (never into the next word)."""
+        ws = self._script_words()
+        i = self._word_index(t0)
+        if edge == "start":
+            before = ws[i - 1][1] if i > 0 and ws[i][0] >= t0 - 0.01 else t0 - 1
+            return max(0.0, max(before + 0.02, t0 - 0.15))
+        nxt = ws[i + 1][0] if i + 1 < len(ws) else t1 + 1
+        return min(nxt - 0.02, t1 + 0.25)
+
+    def set_edge(self, edge: str, t0: float, t1: float, c=None, word: str = ""):
+        c = c or self.current_clip()
+        if not c:
+            return
+        t = self._edge_time(edge, t0, t1) - c.offset
+        if edge == "start":
+            if t >= c.end - 1.0:
+                self.status.setText("That's after the moment ends - set the end first, or use ⟦ Selection ⟧.")
+                return
+            c.start = round(max(0.0, t), 2)
+        else:
+            if t <= c.start + 1.0:
+                self.status.setText("That's before the moment starts - set the start first, or use ⟦ Selection ⟧.")
+                return
+            c.end = round(t, 2)
+        note = f"You set the {edge} on the script" + (f" at “{word}”." if word else ".")
+        c.timing = [x for x in c.timing if not x.startswith(f"You set the {edge} on the script")] + [note]
+        self._after_edges(c)
+
+    def _after_edges(self, c):
+        self._stop()
+        self._sync_words(c)
+        self._render(scroll="keep")
+        self._sync_views()
+        self._relabel(c)
+        self._lengths()
+        self._update_buttons()
+        self._push(c)
+
+    def _cursor_words(self):
+        """(first, last) words under the text cursor / selection: (t0, t1, text) in project time."""
+        v = self.view
+        cur = v.textCursor()
+        if not v.wspans:
+            return None
+        a, b = (cur.selectionStart(), cur.selectionEnd()) if cur.hasSelection() else (cur.position(), cur.position())
+        i, j = v.word_at(a), v.word_at(max(a, b - 1) if cur.hasSelection() else b)
+        if i is None:
+            return None
+        doc = v.document()
+
+        def text(k):
+            x0, x1 = v.wspans[k][0], v.wspans[k][1]
+            cc = QTextCursor(doc)
+            cc.setPosition(x0)
+            cc.setPosition(x1, QTextCursor.KeepAnchor)
+            return cc.selectedText()
+        return (v.wspans[i][2], v.wspans[i][3], text(i)), (v.wspans[j][2], v.wspans[j][3], text(j))
+
+    def _edge_from_cursor(self, edge: str):
+        r = self._cursor_words()
+        if not r:
+            return
+        first, last = r
+        w = first if edge == "start" else last
+        self.set_edge(edge, w[0], w[1], word=w[2])
+
+    def _selection_to_moment(self):
+        c = self.current_clip()
+        r = self._cursor_words()
+        if not (c and r):
+            return
+        first, last = r
+        if last[1] - first[0] < 1.0:
+            self.status.setText("Select at least a second of words to make them the moment.")
+            return
+        c.start = round(self._edge_time("start", first[0], first[1]) - c.offset, 2)
+        c.end = round(self._edge_time("end", last[0], last[1]) - c.offset, 2)
+        c.timing = [x for x in c.timing if not x.startswith("You set the")] + \
+            [f"You set it on the script: “{first[2]}” … “{last[2]}”."]
+        self._after_edges(c)
+
+    def _new_moment(self, a: float, b: float, text: str):
+        if b - a < 1.0:
+            b = a + 1.0
+        src = self.project.source
+        nc = editor.Clip(source=src, start=round(self._edge_time("start", a, a) , 2),
+                         end=round(self._edge_time("end", b, b), 2),
+                         title=(text[:40] + "…") if len(text) > 40 else (text or "My moment"), origin="manual",
+                         reasons=["Made on the script"], timing=["You made it from the script."])
+        nc.orig = [nc.start, nc.end]
+        self.project.clips.append(nc)
+        self.win._fill_clip_list()
+        self.win.clip_list.setCurrentRow(len(self.project.clips) - 1)
+        self.refresh()
+        self.select_clip(nc)
+
+    def _word_menu(self, pos: int, gpos):
+        v = self.view
+        i = v.word_at(pos)
+        if i is None:
+            return
+        t0, t1 = v.wspans[i][2], v.wspans[i][3]
+        cc = QTextCursor(v.document())
+        cc.setPosition(v.wspans[i][0])
+        cc.setPosition(v.wspans[i][1], QTextCursor.KeepAnchor)
+        word = cc.selectedText()
+        c = self.current_clip()
+        sa, sb_, stext = self._sentence(t0)
+        has_sel = v.textCursor().hasSelection()
+        m = QMenu(self)
+        if c is not None:
+            n = self.project.clips.index(c) + 1
+            m.addSection(f"Moment {n}: {c.title[:40]}")
+            m.addAction(f"⟦  Start it at “{word}”", lambda: self.set_edge("start", t0, t1, word=word))
+            m.addAction(f"End it after “{word}”  ⟧", lambda: self.set_edge("end", t0, t1, word=word))
+            m.addAction("⟦  Start it where this sentence starts",
+                        lambda: self.set_edge("start", sa, sa, word=stext.split(" ")[0] if stext else ""))
+            m.addAction("End it where this sentence ends  ⟧",
+                        lambda: self.set_edge("end", sb_, sb_, word=stext.split(" ")[-1] if stext else ""))
+            if has_sel:
+                m.addAction("⟦ Make the selected words the moment ⟧", self._selection_to_moment)
+            inside = c.start + c.offset <= t0 < c.end + c.offset
+            if inside:
+                m.addSeparator()
+                m.addAction("✂  Cut selected  (Del)", self.cut_selected)
+                m.addAction("↩  Restore selected  (Enter)", self.restore_selected)
+        others = [(k, x) for k, x in enumerate(self.project.clips)
+                  if x is not c and x.start + x.offset <= t0 < x.end + x.offset]
+        if others:
+            m.addSeparator()
+            for k, x in others:
+                m.addAction(f"Go to moment {k + 1}: {x.title[:40]}", lambda x=x: self.select_clip(x))
+        m.addSeparator()
+        m.addAction("＋  New moment from this sentence", lambda: self._new_moment(sa, sb_, stext))
+        if has_sel:
+            r = self._cursor_words()
+            if r:
+                m.addAction("＋  New moment from the selected words",
+                            lambda: self._new_moment(r[0][0], r[1][1], f"{r[0][2]} … {r[1][2]}"))
+        m.addAction("▶  Play from here", lambda: self._play_free(t0))
+        self._exec_menu(m, gpos)
+
+    def _exec_menu(self, m, gpos):
+        m.exec(gpos)
 
     def quick_cleanup(self):
         c = self.current_clip()
@@ -679,6 +1206,9 @@ class ScriptPanel(QWidget):
         if not (self.player and c):
             return
         self._restore_source()
+        self._free_play = False
+        if self.player.source() != QUrl.fromLocalFile(c.source):
+            self.player.setSource(QUrl.fromLocalFile(c.source))
         for a, b in c.cuts:
             if a <= t < b:
                 t = b
@@ -691,6 +1221,7 @@ class ScriptPanel(QWidget):
         if self.player:
             self.player.pause()
         self._stop_at = None
+        self._free_play = False
         self.btn_play.setText("▶ Play the edit")
         self.view.setExtraSelections([])
         self.clip_tl.set_playing(False)
@@ -701,10 +1232,58 @@ class ScriptPanel(QWidget):
         if self.player:
             self._play_from(tk["start"])
 
+    def _play_free(self, t: float):
+        """Play the stream from a word outside the moment (project time)."""
+        if not self.player or not self.project.source:
+            return
+        c = self.current_clip()
+        if c is not None and c.start + c.offset <= t < c.end + c.offset - 0.1:
+            self._play_from(t - c.offset)
+            return
+        self._stop()
+        self._preview = False
+        src = self.project.source
+        if self.player.source() != QUrl.fromLocalFile(src):
+            self.player.setSource(QUrl.fromLocalFile(src))
+        self._free_play = True
+        self._stop_at = 1e12
+        self.player.setPosition(int(max(0.0, t) * 1000))
+        self.player.play()
+        self.btn_play.setText("■ Stop")
+
+    def _highlight_time(self, tp: float):
+        """Mark the word being heard (project time) and keep it in view."""
+        v = self.view
+        if not v.wspans:
+            return
+        keys = [x[2] for x in v.wspans] if len(getattr(self, "_wt_keys", [])) != len(v.wspans) else self._wt_keys
+        self._wt_keys = keys
+        i = bisect.bisect_right(keys, tp + 0.02) - 1
+        if i < 0 or v.wspans[i][3] + 0.3 < tp:
+            v.setExtraSelections([])
+            return
+        sel = QTextEdit.ExtraSelection()
+        cur = v.textCursor()
+        cur.setPosition(v.wspans[i][0])
+        cur.setPosition(v.wspans[i][1], QTextCursor.KeepAnchor)
+        sel.cursor = cur
+        sel.format.setBackground(QBrush(QColor(COL["now"])))
+        v.setExtraSelections([sel])
+        r = v.cursorRect(cur)
+        if r.bottom() > v.viewport().height() - 10 or r.top() < 0:
+            sb = v.verticalScrollBar()
+            sb.setValue(sb.value() + r.top() - v.viewport().height() // 3)
+
     def _pos(self, ms):
         c = self.current_clip()
         if self._preview and c:
             self.pos_label.setText(f"👁 with effects  {fmt_time(ms / 1000)} / {fmt_time(c.out_length)}")
+            return
+        if self._free_play:
+            t = ms / 1000
+            self.pos_label.setText(f"{fmt_time(self.project.to_stream(t))}  (the stream)")
+            self.overview.set_playhead(t)
+            self._highlight_time(t)
             return
         if not c or self._stop_at is None:
             return
@@ -722,16 +1301,7 @@ class ScriptPanel(QWidget):
         self.clip_tl.set_playing(True)
         self.overview.set_playhead(t + c.offset)
         self.overview.set_playing(self.project.clips.index(c) if c in self.project.clips else -1)
-        k = next((i for i, tk in enumerate(self._toks) if tk["start"] <= t <= tk["end"] + 0.05), None)
-        if k is not None and k < len(self.view.spans):
-            sel = QTextEdit.ExtraSelection()
-            x, y, _ = self.view.spans[k]
-            cur = self.view.textCursor()
-            cur.setPosition(x)
-            cur.setPosition(y, QTextCursor.KeepAnchor)
-            sel.cursor = cur
-            sel.format.setBackground(QBrush(QColor(COL["now"])))
-            self.view.setExtraSelections([sel])
+        self._highlight_time(t + c.offset)
 
     # ------------------------------------------------------------------ where the moment is
     def _sync_views(self, keep_view: bool = False):
@@ -801,6 +1371,7 @@ class ScriptPanel(QWidget):
         note = "You set the start and end yourself on the moment's timeline."
         if note not in c.timing:
             c.timing = list(c.timing) + [note]
+        self._sync_words(c)
         self._render()
         self._sync_views(keep_view=True)
         self._relabel(c)

@@ -214,6 +214,10 @@ class Project:
     sections: list = field(default_factory=list)
     # the scan itself, so it survives restarts and updates: {"duration", "times", "score", "candidates", "shown"}
     analysis: dict = field(default_factory=dict)
+    # 📝 the whole stream written out: [[start, end, word], ...] in this project's time, and which stretches
+    # [[a, b], ...] have been written out so far (it can be done in goes)
+    script: list = field(default_factory=list)
+    script_done: list = field(default_factory=list)
 
     def to_stream(self, t: float) -> float:
         """Position in this project's file -> position in the original stream."""
@@ -261,7 +265,8 @@ class Project:
         return Project(source=d.get("source", ""), title=d.get("title", ""), url=d.get("url", ""),
                        offset=float(d.get("offset", 0.0)), segments=d.get("segments", []) or [],
                        clips=clips, export=exp, sections=d.get("sections", []) or [],
-                       analysis=d.get("analysis", {}) or {})
+                       analysis=d.get("analysis", {}) or {}, script=d.get("script", []) or [],
+                       script_done=d.get("script_done", []) or [])
 
 
 # ----------------------------------------------------------------------------- helpers
