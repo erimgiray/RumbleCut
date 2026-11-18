@@ -8,14 +8,15 @@ import queue
 import time
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QKeySequence, QShortcut, QTextBlockFormat,
+                           QTextCharFormat, QTextCursor, QTextOption)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QMenu, QPlainTextEdit, QProgressBar, QToolTip, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
-from .. import ai, editor, script_edit as se, transcribe
+from .. import ai, config, editor, script_edit as se, transcribe
 from .flow import FlowLayout
 from .timeline import ClipTimeline, Timeline, _origin_colour, fmt_time
 from .workers import Worker
@@ -354,6 +355,11 @@ class ScriptPanel(QWidget):
         self.jump.setToolTip("Punch-in zooms in a little on every other piece, so cuts look like a camera "
                              "change instead of a twitch")
         self.jump.currentIndexChanged.connect(self._jump_changed)
+        self.btn_times = QPushButton("🕒 Times")
+        self.btn_times.setCheckable(True)
+        self.btn_times.setChecked(bool(config.load_settings().get("script_times", True)))
+        self.btn_times.setToolTip("Show when each paragraph starts, in a column on the left of the script")
+        self.btn_times.toggled.connect(self._times_toggled)
         self.btn_undo = QPushButton("↶ Undo")
         self.btn_undo.clicked.connect(self.undo)
         self.btn_redo = QPushButton("↷ Redo")
@@ -361,6 +367,7 @@ class ScriptPanel(QWidget):
         for b in (self.btn_clean, self.btn_ai, self.btn_accept_all, self.btn_dismiss_all):
             tools.addWidget(b)
         tools.addStretch()
+        tools.addWidget(self.btn_times)
         tools.addWidget(self.jump)
         tools.addWidget(self.btn_undo)
         tools.addWidget(self.btn_redo)
@@ -721,6 +728,23 @@ class ScriptPanel(QWidget):
         stamp.setFontPointSize(max(7.0, v.font().pointSizeF() * 0.62))
         gapf = QTextCharFormat(stamp)
         gapf.setFontItalic(True)
+        # 🕒 Times on: each paragraph's start time sits in a column on the left (a hanging indent, so the
+        # text lines up beside it). Off: no times, just the paragraphs.
+        show_times = self.btn_times.isChecked()
+        par_fmt = QTextBlockFormat()
+        par_fmt.setBottomMargin(4)
+        if show_times:
+            sf = QFont(v.font())
+            sf.setPointSizeF(stamp.fontPointSize())
+            gut = QFontMetricsF(sf).horizontalAdvance("00:00:00") + 16
+            par_fmt.setLeftMargin(gut)
+            par_fmt.setTextIndent(-gut)
+            par_fmt.setTabPositions([QTextOption.Tab(gut, QTextOption.LeftTab)])
+        cur.setBlockFormat(par_fmt)
+
+        def put_stamp(t):
+            if show_times:
+                cur.insertText(f"{fmt_time(self.project.to_stream(t))}\t", stamp)
 
         def tint(origin, alpha):
             col = QColor(_origin_colour(origin))
@@ -819,8 +843,8 @@ class ScriptPanel(QWidget):
         par_t = [0.0]
 
         def new_par(t):
-            cur.insertBlock()
-            cur.insertText(f"{fmt_time(self.project.to_stream(t))}   ", stamp)
+            cur.insertBlock(par_fmt)
+            put_stamp(t)
             par_t[0] = t
 
         covered = self._covered()
@@ -902,8 +926,8 @@ class ScriptPanel(QWidget):
                 # dragging a start in front of a paragraph's first word keeps it there (it used to slide
                 # back onto the end of the paragraph before)
                 if first:
+                    put_stamp(min(a, cs))
                     put_marks(min(a, cs), inclusive=False)
-                    cur.insertText(f"{fmt_time(self.project.to_stream(min(a, cs)))}   ", stamp)
                     par_t[0] = min(a, cs)
                 elif prev is not None and (cs - prev[1] > 1.2 or par_break(min(a, cs))):
                     put_marks(min(a, cs), inclusive=False, only="end")
@@ -913,14 +937,16 @@ class ScriptPanel(QWidget):
                 continue                              # this moment's words are written above
             # paragraphs: a new line after a sentence and a pause, or after a long pause
             if first:
-                cur.insertText(f"{fmt_time(self.project.to_stream(a))}   ", stamp)
+                put_stamp(a)
                 par_t[0] = a
                 first = False
             elif prev is not None:
                 gap = a - prev[1]
                 if gap > 30 and not is_covered(prev[1], a):
                     put_marks(prev[1] + 0.01, only="end")
-                    cur.insertBlock()
+                    cur.insertBlock(par_fmt)
+                    if show_times:
+                        cur.insertText("\t", stamp)
                     cur.insertText(f"[… {fmt_time(self.project.to_stream(prev[1]))} – "
                                    f"{fmt_time(self.project.to_stream(a))} not written out yet]", gapf)
                     new_par(a)
@@ -951,6 +977,10 @@ class ScriptPanel(QWidget):
             v.scroll_to(keep_val)
         self._last_render = time.monotonic()
         self._lengths()
+
+    def _times_toggled(self, on: bool):
+        config.save_settings({"script_times": bool(on)})
+        self._render(scroll="keep")
 
     def _scroll_to_moment(self):
         if self._moment_pos is None:
