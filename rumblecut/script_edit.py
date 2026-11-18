@@ -100,8 +100,15 @@ class Quiet:
 
 
 # ============================================================================ word <-> cut ranges
+def in_clip(a: float, b: float, start: float, end: float) -> bool:
+    """Whether a word belongs to a moment: its middle is inside. Speech-to-text word times often touch or
+    overlap a little, so an edge set right in front of a word mustn't pull in the word before it."""
+    m = (a + b) / 2
+    return start < m < end
+
+
 def _words(clip: Clip) -> list[tuple[float, float, str]]:
-    return [(float(a), float(b), str(w)) for a, b, w in clip.words if b > clip.start and a < clip.end]
+    return [(float(a), float(b), str(w)) for a, b, w in clip.words if in_clip(a, b, clip.start, clip.end)]
 
 
 def word_cut_range(words, i: int, j: int, clip: Clip, quiet: Quiet) -> tuple[float, float]:

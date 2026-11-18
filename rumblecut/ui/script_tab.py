@@ -897,7 +897,7 @@ class ScriptPanel(QWidget):
         for wd in ws:
             a, b, w = wd[0], wd[1], wd[2]
             draft = len(wd) > 3
-            if c is not None and not done_current and (a >= cs - 0.01 or b > cs):
+            if c is not None and not done_current and (a + b) / 2 > cs:
                 # the moment's first word gets the same paragraph break it would get as a plain word, so
                 # dragging a start in front of a paragraph's first word keeps it there (it used to slide
                 # back onto the end of the paragraph before)
@@ -909,7 +909,7 @@ class ScriptPanel(QWidget):
                     put_marks(min(a, cs), inclusive=False, only="end")
                     new_par(min(a, cs))
                 insert_current()
-            if c is not None and done_current and a < ce and b > cs:
+            if c is not None and done_current and se.in_clip(a, b, cs, ce):
                 continue                              # this moment's words are written above
             # paragraphs: a new line after a sentence and a pause, or after a long pause
             if first:
@@ -999,7 +999,7 @@ class ScriptPanel(QWidget):
         """File-time ranges covering the given tokens (words grouped so cuts land between words)."""
         c = self.current_clip()
         q = self._quiet_for(c)
-        words = [(float(a), float(b), str(w)) for a, b, w in c.words if b > c.start and a < c.end]
+        words = se._words(c)             # the same words the tokens index into
         out, run = [], []
         for k in sorted(ks) + [None]:
             tk = self._toks[k] if k is not None else None
@@ -1326,15 +1326,32 @@ class ScriptPanel(QWidget):
         return float(ws[a][0]), float(ws[b][1]), " ".join(w for _, _, w in ws[a:b + 1])
 
     def _edge_time(self, edge: str, t0: float, t1: float) -> float:
-        """Project time for a moment edge at a word: a breath before it starts, or just after it ends
-        (never into the next word)."""
+        """Project time for a moment edge at a word: a breath before it starts, or just after it ends.
+        Always on the right side of the word itself - speech-to-text often gives touching or overlapping
+        word times (a short "I" can even start before the previous word "ends"), and then the edge used to
+        land inside or after the word, so the moment couldn't be started in front of it."""
         ws = self._script_words()
+        if not ws:
+            return max(0.0, t0 - 0.25) if edge == "start" else t1 + 0.25
         i = self._word_index(t0)
         if edge == "start":
-            before = ws[i - 1][1] if i > 0 and ws[i][0] >= t0 - 0.01 else t0 - 1
-            return max(0.0, max(before + 0.02, t0 - 0.15))
-        nxt = ws[i + 1][0] if i + 1 < len(ws) else t1 + 1
-        return min(nxt - 0.02, t1 + 0.25)
+            latest = t0 - 0.04                              # never after the word begins
+            prev_end = ws[i - 1][1] if i > 0 and ws[i][0] >= t0 - 0.01 else None
+            if prev_end is not None and prev_end < latest:
+                t = max(prev_end + 0.02, t0 - 0.25)         # in the gap, up to a breath before
+            else:
+                t = latest                                  # words touch: start right in front of this one
+            return max(0.0, min(latest, t))
+        earliest = t1 + 0.04                                # never before the word ends
+        j = i
+        while j < len(ws) - 1 and ws[j][1] < t1 - 0.01:      # the word that ends at t1
+            j += 1
+        nxt = ws[j + 1][0] if j + 1 < len(ws) else None
+        if nxt is not None and nxt > earliest:
+            t = min(nxt - 0.02, t1 + 0.25)
+        else:
+            t = earliest
+        return max(earliest, t)
 
     def set_edge(self, edge: str, t0: float, t1: float, c=None, word: str = ""):
         c = c or self.current_clip()
