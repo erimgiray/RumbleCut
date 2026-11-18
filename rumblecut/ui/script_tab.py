@@ -825,6 +825,15 @@ class ScriptPanel(QWidget):
 
         covered = self._covered()
 
+        def par_break(a):
+            """A new paragraph before a word at time a: after a sentence and a pause, a long pause,
+            or a long paragraph that just finished a sentence."""
+            if prev is None:
+                return False
+            gap = a - prev[1]
+            end = prev[2][-1:] in ".?!"
+            return gap > 3.0 or (gap > 1.2 and end) or (a - par_t[0] > 45 and end)
+
         def is_covered(a, b):
             return any(x <= a + 1 and y >= b - 1 for x, y in covered)
 
@@ -889,9 +898,16 @@ class ScriptPanel(QWidget):
             a, b, w = wd[0], wd[1], wd[2]
             draft = len(wd) > 3
             if c is not None and not done_current and (a >= cs - 0.01 or b > cs):
-                if prev is not None and cs - prev[1] > 1.2:
-                    put_marks(cs, inclusive=False, only="end")
-                    new_par(cs)
+                # the moment's first word gets the same paragraph break it would get as a plain word, so
+                # dragging a start in front of a paragraph's first word keeps it there (it used to slide
+                # back onto the end of the paragraph before)
+                if first:
+                    put_marks(min(a, cs), inclusive=False)
+                    cur.insertText(f"{fmt_time(self.project.to_stream(min(a, cs)))}   ", stamp)
+                    par_t[0] = min(a, cs)
+                elif prev is not None and (cs - prev[1] > 1.2 or par_break(min(a, cs))):
+                    put_marks(min(a, cs), inclusive=False, only="end")
+                    new_par(min(a, cs))
                 insert_current()
             if c is not None and done_current and a < ce and b > cs:
                 continue                              # this moment's words are written above
@@ -908,8 +924,7 @@ class ScriptPanel(QWidget):
                     cur.insertText(f"[… {fmt_time(self.project.to_stream(prev[1]))} – "
                                    f"{fmt_time(self.project.to_stream(a))} not written out yet]", gapf)
                     new_par(a)
-                elif gap > 3.0 or (gap > 1.2 and prev[2][-1:] in ".?!") or \
-                        (a - par_t[0] > 45 and prev[2][-1:] in ".?!"):      # keep paragraphs readable
+                elif par_break(a):      # keep paragraphs readable
                     put_marks(a, inclusive=False, only="end")
                     new_par(a)
             put_marks(a)
